@@ -18,6 +18,10 @@ SEEDS = [0, 1, 42, 2, 7, 123]
 LEVELS = [2, 3]
 BASIS_GATES = ["rz", "sx", "x", "cx"]
 CHECKS = ("ignoring_final_layout_must_fail", "extra_x_gate_must_fail")
+# Uncommitted changes under these paths would make the recorded revision misdescribe the code
+# under test, and the compiled extension must not predate any of these Rust inputs.
+SOURCE_PATHS = ("qiskit", "crates", "test/benchmarks", "Cargo.toml", "Cargo.lock")
+RUST_SOURCES = ("Cargo.toml", "Cargo.lock", "crates/**/Cargo.toml", "crates/**/*.rs")
 
 
 def fixtures():
@@ -117,7 +121,8 @@ def transpile_and_check(qc, reference, cmap, seed, level, metrics):
 
     Observe the real move finder without changing its return value. A callback
     separately confirms that the pass ran, including invocations with no SWAPs.
-    Metrics remain available to the caller even if a later correctness check fails.
+    Metrics are filled in before the unitary comparison, so they remain available
+    to the caller when that comparison fails.
     """
     from qiskit.quantum_info import Operator
     from qiskit.transpiler import generate_preset_pass_manager
@@ -162,10 +167,11 @@ def transpile_and_check(qc, reference, cmap, seed, level, metrics):
                 f"Unrouted gate: {inst.operation.name}{qubits}")
         require(inst.operation.name in BASIS_GATES,
                 f"Gate outside requested basis: {inst.operation.name}")
-    # Equality includes global phase; do not use Operator.equiv here.
-    require(Operator.from_circuit(out) == reference, "Operator mismatch")
     metrics.update(depth=out.depth(), two_qubit_gates=sum(
         len(inst.qubits) == 2 and not inst.operation._directive for inst in out.data))
+    # Operator.__eq__ compares the matrices elementwise (np.allclose, default tolerances),
+    # so a global-phase difference fails. Operator.equiv would ignore it; do not use it.
+    require(Operator.from_circuit(out) == reference, "Operator mismatch")
     return out
 
 
@@ -195,6 +201,32 @@ def self_checks(sample, level):
     return results
 
 
+def source_revision(source, extension):
+    """Return the revision of ``source``, refusing trees that revision would not describe.
+
+    Without a ``REVISION`` file the tree must be a git checkout with no uncommitted changes,
+    including untracked files, under ``SOURCE_PATHS``. In every case ``extension`` (the
+    compiled ``qiskit._accelerate`` module) must not be older than any Rust input matched by
+    ``RUST_SOURCES``; rebuild it with ``python setup.py build_rust --inplace --release``.
+    """
+    revision = source / "REVISION"
+    if revision.exists():
+        sha = revision.read_text().strip()
+    else:
+        git = ["git", "-C", str(source)]
+        sha = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
+        changes = subprocess.check_output(
+            [*git, "status", "--porcelain", "--untracked-files=all", "--", *SOURCE_PATHS],
+            text=True)
+        require(not changes, f"Uncommitted changes in the Qiskit source tree:\n{changes}")
+    rust_sources = [path for pattern in RUST_SOURCES for path in source.glob(pattern)]
+    if rust_sources:
+        newest = max(rust_sources, key=lambda path: path.stat().st_mtime)
+        require(extension.stat().st_mtime >= newest.stat().st_mtime,
+                f"Compiled extension is older than {newest.relative_to(source)}; rebuild it")
+    return sha
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--qiskit-src", type=Path,
@@ -220,9 +252,7 @@ def main():
     # Refuse to validate an unrelated installed package or compiled extension.
     for module in (qiskit, qiskit._accelerate):
         require(Path(module.__file__).resolve().is_relative_to(source), "Wrong Qiskit source")
-    revision = source / "REVISION"
-    sha = (revision.read_text().strip() if revision.exists() else
-           subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip())
+    sha = source_revision(source, Path(qiskit._accelerate.__file__))
     builders = fixtures()
     records = [dict(
         record="environment", schema_version=2, sha=sha, qiskit_version=qiskit.__version__,

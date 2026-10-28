@@ -3,7 +3,7 @@
 **PASS** — 192/192 cases; 4/4 negative self-checks; 10/10 focused checks.
 
 Revision: `6b5145d2e94799ba3b01494a706537efc2925242`. Seeds: `[0, 1, 42, 2, 7, 123]`. Optimization levels: `[2, 3]`.
-Run: 2026-10-28T12:40:48+00:00. Qiskit 2.7.0.dev0+6b5145d; Python 3.11.8.
+Run: 2026-10-28T13:46:59+00:00. Qiskit 2.7.0.dev0+6b5145d; Python 3.11.8.
 Loaded extension SHA-256: `627034a679e9e709e36d8e4b5726a78731abc4c126622e7b884364f6bfd058f8`.
 
 16 circuits, 10 qubits each; full preset pipeline, bidirectional line, trivial initial layout, SABRE routing, and the `rz`, `sx`, `x`, `cx` basis. Exact synthesis; arbitrary input states (`qubits_initially_zero=False`).
