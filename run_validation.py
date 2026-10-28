@@ -26,7 +26,7 @@ RUST_SOURCES = ("Cargo.toml", "Cargo.lock", "crates/**/Cargo.toml", "crates/**/*
 
 
 def fixtures():
-    """Return the 16 named test circuits as zero-argument builder callables.
+    """Return the 11 named test circuits as zero-argument builder callables.
 
     The builders are lazy so that ``main`` can build each circuit inside its own
     ``try`` block: a fixture that fails to build is recorded as failing for every
@@ -35,12 +35,8 @@ def fixtures():
     """
     # Imported here, not at module level, because these must come from the Qiskit
     # source tree that main() has just put at the front of sys.path.
-    # NumPy provides the seeded random generator for the quantum-volume builder.
-    import numpy as np
-    # Circuit classes used by the local quantum-volume builder and by the QFT fixture.
+    # Circuit classes used by the local phase builders and by the QFT fixture.
     from qiskit import QuantumCircuit, QuantumRegister
-    # Haar-random unitaries for the two-qubit blocks of the quantum-volume circuit.
-    from qiskit.quantum_info import random_unitary
     from qiskit.synthesis import synth_mcx_noaux_hp24
     # Circuit builders from Qiskit's own benchmark suite (needs `ddt` installed).
     from test.benchmarks import qft, utils
@@ -56,33 +52,6 @@ def fixtures():
         output = QuantumCircuit(10)
         output.compose(circuit.remove_final_measurements(inplace=False), wires, inplace=True)
         return output
-
-    def quantum_volume(seed):
-        """Build a QV-style circuit with diagonal layers that permit absorption.
-
-        Generic Haar blocks do not commute with neighboring interactions. Two
-        diagonal-unitary layers followed by one Haar layer keep the random-pair
-        structure while giving the optimization nontrivial commuting work.
-        This is deliberately a variant, not the standard QV benchmark.
-        """
-        # One generator drives both the qubit pairings and the unitaries, so the
-        # whole circuit is fixed by `seed`.
-        rng = np.random.default_rng(seed)
-        # Start from an empty 10-qubit circuit with no classical bits.
-        qc = QuantumCircuit(10)
-        # Quantum volume uses depth equal to width: 10 layers for 10 qubits.
-        for layer in range(10):
-            # Shuffle the qubits; consecutive entries form this layer's pairs.
-            perm = rng.permutation(10)
-            # Step through the permutation two at a time: 5 disjoint pairs per layer.
-            for k in range(0, 10, 2):
-                pair = [int(perm[k]), int(perm[k + 1])]
-                if layer % 3 != 2:
-                    phases = rng.uniform(0, 2 * np.pi, 4)
-                    qc.unitary(np.diag(np.exp(1j * phases)), pair)
-                else:
-                    qc.append(random_unitary(4, seed=rng), pair)
-        return on_wires(qc, spread)
 
     def phase_ring():
         """A 20-layer ring with commuting CP/RZ layers and RX mixers."""
@@ -111,35 +80,20 @@ def fixtures():
             qc.cx(control, 9)
         return on_wires(qc, spread)
 
-    # Shared random-circuit builder: 10 qubits, gates on at most two qubits, and no
-    # measurements, classically conditioned gates or resets, so the result is a
-    # pure unitary. Callers still supply the depth (positionally) and the seed.
-    random = partial(utils.random_circuit, 10, max_operands=2,
-                     measure=False, conditional=False, reset=False)
     # Fixture name -> builder. Insertion order is the order cases run and are reported.
     return {
         # Quantum Fourier transform on a 10-qubit register: H gates plus all-to-all
         # controlled-phase gates, which forces many SWAPs on a line.
         "qft10": lambda: qft.build_model_circuit(QuantumRegister(10)),
-        # Random circuit of depth 60 with circuit seed 42.
-        "random10x60": partial(random, 60, seed=42),
         # 4-bit ripple-carry adder: registers a(4) + b(4) + cin(1) + cout(1) = 10 qubits.
         # It contains Toffoli gates (expanded later) and final measurements (removed later).
         "adder4": lambda: on_wires(utils.build_ripple_adder_circuit(4), spread_chain),
         # Ring variant with commuting phases, rather than generic 1q rotations
         # that block every candidate move in the original benchmark.
         "ring10": phase_ring,
-        # QV-style diagonal/Haar circuit from the local builder above, seed 42.
-        "qv10": partial(quantum_volume, 42),
         # Floquet unitary for discrete-time-crystal (DTC) evolution, using the
         # builder's default parameters (g=0.95, seed=12345).
         "dtc10": lambda: on_wires(utils.dtc_unitary(10), spread_chain),
-        # Shallower random circuit: depth 20, circuit seed 7.
-        "random10x20": partial(random, 20, seed=7),
-        # Medium random circuit: depth 40, circuit seed 123.
-        "random10x40": partial(random, 40, seed=123),
-        # Second QV-style instance with a different seed (7).
-        "qv10_seed7": partial(quantum_volume, 7),
         # Bernstein-Vazirani for the all-ones secret: every data qubit has a CX
         # onto the last qubit (star-shaped interactions).
         "bv10": lambda: on_wires(utils.bv_all_ones(10), spread_bv),
@@ -487,15 +441,11 @@ def main():
                         try:
                             check_output(baseline_out, qc, reference, cmap, baseline_metrics,
                                          unitary_cache)
-                        except OperatorMismatch:
+                        except OperatorMismatch as exc:
+                            raise OperatorMismatch("Baseline operator mismatch") from exc
+                        finally:
                             rec.update({f"baseline_{key}": value
                                         for key, value in baseline_metrics.items()})
-                            rec.update(record="excluded_case", reason="baseline_operator_mismatch",
-                                       error="Baseline operator mismatch")
-                            records.append(rec)
-                            print("EXCLUDED (baseline operator mismatch)", flush=True)
-                            continue
-                        rec.update({f"baseline_{key}": value for key, value in baseline_metrics.items()})
                         rec["baseline_passed"] = True
                         out = transpile_and_check(qc, reference, cmap, seed, level, rec, unitary_cache)
                         with patch.object(_swap_absorption._AbsorbIntoSwaps, "run",
@@ -531,9 +481,8 @@ def main():
     records += feature_checks()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
-    failed = sum(not r["passed"] for r in records[1:] if r["record"] != "excluded_case")
-    excluded = sum(r["record"] == "excluded_case" for r in records)
-    print(f"{failed} failures; {excluded} cases excluded for baseline operator mismatch; wrote {args.out}")
+    failed = sum(not r["passed"] for r in records[1:])
+    print(f"{failed} failures; wrote {args.out}")
     return int(failed != 0)
 
 

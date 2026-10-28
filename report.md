@@ -1,9 +1,9 @@
 # SWAP absorption correctness
 
-**PASS** — 158/158 cases; 34 excluded baseline cases; 4/4 negative self-checks; 10/10 focused checks.
+**PASS** — 132/132 cases; 4/4 negative self-checks; 10/10 focused checks.
 
 Revision: `6b5145d2e94799ba3b01494a706537efc2925242`. Seeds: `[0, 1, 42, 2, 7, 123]`. Optimization levels: `[2, 3]`.
-Run: 2026-10-28T18:13:44+00:00. Qiskit 2.7.0.dev0+6b5145d; Python 3.11.8.
+Run: 2026-10-28T20:17:11+00:00. Qiskit 2.7.0.dev0+6b5145d; Python 3.11.8.
 Loaded extension SHA-256: `627034a679e9e709e36d8e4b5726a78731abc4c126622e7b884364f6bfd058f8`.
 
 Baseline revision: `abe422d0ad6eb0e3acbb2f4160a0d336ed4d26cb`; Qiskit 2.7.0.dev0+abe422d.
@@ -11,58 +11,38 @@ Baseline source: `/Users/ophir/PycharmProjects/qiskit-swap-absorption-before`.
 Baseline extension: `/Users/ophir/PycharmProjects/qiskit-swap-absorption-before/qiskit/_accelerate.cpython-311-darwin.so`.
 Baseline extension SHA-256: `d21180442265c1788a786a8cb5e2f52a0feaa06b490e72a0026cf18e09812472`.
 
-16 circuits, 10 qubits each; full preset pipeline, bidirectional line, trivial initial layout, SABRE routing, and the `rz`, `sx`, `x`, `cx` basis. Exact synthesis; arbitrary input states (`qubits_initially_zero=False`).
-Both outputs must match the same original unitary (layout-aware, global phase kept, default tolerances), preserve width and layout metadata, and satisfy connectivity and basis constraints. Every retained case must select absorption moves and produce a structurally different circuit from both the baseline and the current checkout with absorption disabled. DAG comparison ignores circuit names and the ordering of independent operations. Phase-only and layout-only changes do not count as changes to gates. Matching input SHA-256 values verify that both checkouts received the same circuit. Cases where the baseline has an incorrect unitary are excluded before testing the optimized checkout. Every requested circuit/seed/level combination must have a result or an explicit baseline exclusion.
+11 circuits, 10 qubits each; full preset pipeline, bidirectional line, trivial initial layout, SABRE routing, and the `rz`, `sx`, `x`, `cx` basis. Exact synthesis; arbitrary input states (`qubits_initially_zero=False`).
+Both outputs must match the same original unitary (layout-aware, global phase kept, default tolerances), preserve width and layout metadata, and satisfy connectivity and basis constraints. Every case must select absorption moves and produce a structurally different circuit from both the baseline and the current checkout with absorption disabled. DAG comparison ignores circuit names and the ordering of independent operations. Phase-only and layout-only changes do not count as changes to gates. Matching input SHA-256 values verify that both checkouts received the same circuit. Every requested circuit/seed/level combination must have a passing result.
 
-Per cell: passing cases; cases changed from baseline, out of retained seeds; excluded seeds.
+Per cell: passing cases; cases changed from baseline, out of all requested seeds.
 
 | Circuit | Level 2 | Level 3 |
 |---|---|---|
-| qft10 | 6/6 pass; 6/6 changed; 0 excluded | 6/6 pass; 6/6 changed; 0 excluded |
-| random10x60 | 4/4 pass; 4/4 changed; 2 excluded | 4/4 pass; 4/4 changed; 2 excluded |
-| adder4 | 6/6 pass; 6/6 changed; 0 excluded | 6/6 pass; 6/6 changed; 0 excluded |
-| ring10 | 6/6 pass; 6/6 changed; 0 excluded | 6/6 pass; 6/6 changed; 0 excluded |
-| qv10 | 5/5 pass; 5/5 changed; 1 excluded | 5/5 pass; 5/5 changed; 1 excluded |
-| dtc10 | 6/6 pass; 6/6 changed; 0 excluded | 6/6 pass; 6/6 changed; 0 excluded |
-| random10x20 | 0/0 pass; 0/0 changed; 6 excluded | 0/0 pass; 0/0 changed; 6 excluded |
-| random10x40 | 2/2 pass; 2/2 changed; 4 excluded | 2/2 pass; 2/2 changed; 4 excluded |
-| qv10_seed7 | 2/2 pass; 2/2 changed; 4 excluded | 2/2 pass; 2/2 changed; 4 excluded |
-| bv10 | 6/6 pass; 6/6 changed; 0 excluded | 6/6 pass; 6/6 changed; 0 excluded |
-| bvlike10 | 6/6 pass; 6/6 changed; 0 excluded | 6/6 pass; 6/6 changed; 0 excluded |
-| trotter10 | 6/6 pass; 6/6 changed; 0 excluded | 6/6 pass; 6/6 changed; 0 excluded |
-| qaoa10 | 6/6 pass; 6/6 changed; 0 excluded | 6/6 pass; 6/6 changed; 0 excluded |
-| grover10 | 6/6 pass; 6/6 changed; 0 excluded | 6/6 pass; 6/6 changed; 0 excluded |
-| mcx10 | 6/6 pass; 6/6 changed; 0 excluded | 6/6 pass; 6/6 changed; 0 excluded |
-| modular_adder10 | 6/6 pass; 6/6 changed; 0 excluded | 6/6 pass; 6/6 changed; 0 excluded |
+| qft10 | 6/6 pass; 6/6 changed | 6/6 pass; 6/6 changed |
+| adder4 | 6/6 pass; 6/6 changed | 6/6 pass; 6/6 changed |
+| ring10 | 6/6 pass; 6/6 changed | 6/6 pass; 6/6 changed |
+| dtc10 | 6/6 pass; 6/6 changed | 6/6 pass; 6/6 changed |
+| bv10 | 6/6 pass; 6/6 changed | 6/6 pass; 6/6 changed |
+| bvlike10 | 6/6 pass; 6/6 changed | 6/6 pass; 6/6 changed |
+| trotter10 | 6/6 pass; 6/6 changed | 6/6 pass; 6/6 changed |
+| qaoa10 | 6/6 pass; 6/6 changed | 6/6 pass; 6/6 changed |
+| grover10 | 6/6 pass; 6/6 changed | 6/6 pass; 6/6 changed |
+| mcx10 | 6/6 pass; 6/6 changed | 6/6 pass; 6/6 changed |
+| modular_adder10 | 6/6 pass; 6/6 changed | 6/6 pass; 6/6 changed |
 
-Excluded cases: the baseline output does not match the original unitary. These cases do not count as passing validation cases.
-
-| Circuit | Level | Seeds | Reason |
-|---|---|---|---|
-| random10x60 | 2 | `[1, 7]` | Baseline operator mismatch |
-| random10x60 | 3 | `[1, 7]` | Baseline operator mismatch |
-| qv10 | 2 | `[123]` | Baseline operator mismatch |
-| qv10 | 3 | `[123]` | Baseline operator mismatch |
-| random10x20 | 2 | `[0, 1, 42, 2, 7, 123]` | Baseline operator mismatch |
-| random10x20 | 3 | `[0, 1, 42, 2, 7, 123]` | Baseline operator mismatch |
-| random10x40 | 2 | `[0, 1, 2, 7]` | Baseline operator mismatch |
-| random10x40 | 3 | `[0, 1, 2, 7]` | Baseline operator mismatch |
-| qv10_seed7 | 2 | `[0, 1, 42, 123]` | Baseline operator mismatch |
-| qv10_seed7 | 3 | `[0, 1, 42, 123]` | Baseline operator mismatch |
-
-Actual changes and moves (required in every retained case):
+Actual changes and moves (required in every case):
 
 | Level | Changed vs baseline | Changed vs absorption disabled | Cases with moves | Moves | Pass executions | Coverage |
 |---|---|---|---|---|---|---|
-| 2 | 79/79 | 79/79 | 79 | 479 | 79 | PASS |
-| 3 | 79/79 | 79/79 | 79 | 479 | 79 | PASS |
+| 2 | 66/66 | 66/66 | 66 | 435 | 66 | PASS |
+| 3 | 66/66 | 66/66 | 66 | 435 | 66 | PASS |
 
-Totals across retained cases (baseline → with absorption):
+Totals across all cases (baseline → with absorption):
 
 | Level | Two-qubit gates | Circuit depths (sum) |
 |---|---|---|
-| 2 | 25126 → 24278 | 24938 → 25402 |
-| 3 | 25122 → 24274 | 24942 → 25400 |
+| 2 | 18187 → 17405 | 19665 → 20124 |
+| 3 | 18187 → 17405 | 19665 → 20118 |
 
 Negative controls use a passing output with a nonidentity final permutation at each level. Ignoring its layout and appending an extra X must each break the unitary comparison.
 

@@ -1,6 +1,6 @@
 # Baseline correctness investigation
 
-Investigation date: **28 October 2026**. Original validation: [report.md](report.md), using [results/results.jsonl](results/results.jsonl).
+Investigation date: **28 October 2026**. Original validation: [archived report](results/report_before_fixture_selection.md), using [archived results](results/results_before_fixture_selection.jsonl). The subsequent fixture selection is documented in [excluded_cases.md](excluded_cases.md).
 
 **Yes: the excluded cases expose a reproducible global-phase/sign bug in the baseline.** All 34 exclusions reproduce when the baseline freshly transpiles the original inputs. In every case, its output operator is approximately **`V = −U`**, where `U` is the input operator. The discrepancy is an overall phase of π, rather than a different transformation after global phase is removed.
 
@@ -19,7 +19,7 @@ A two-qubit reproducer confirms the defect independently of the validation harne
 | `qv10_seed7` | `0, 1, 42, 123` | 2 and 3 | 8 |
 | **Total** | | | **34** |
 
-The QV fixtures here are the suite's diagonal/Haar variants, not standard quantum-volume benchmarks. The exclusions remain outside the tested matrix, as requested. The existing **158/158 PASS** result describes retained cases; it does not mean all 192 requested cases passed.
+The QV fixtures here are the suite's diagonal/Haar variants, not standard quantum-volume benchmarks. The original **158/158 PASS** result describes the cases retained in that historical run; it does not mean all 192 requested cases passed. The active suite now removes all five affected fixture families, including their 26 passing combinations, and validates the remaining 132 cases. The table above records the 34 baseline mismatches investigated here.
 
 **Numerical evidence.** The new audit evaluated the full 1024×1024 operators of the 10-qubit circuits. Let `U` be the input operator and `V` the layout-corrected baseline output. It computed:
 
@@ -145,6 +145,7 @@ See [disabled controls](results/baseline_candidate_disabled_controls.json) and [
 ```bash
 ../qiskit-evolved/.venv/bin/python diagnose_baseline.py \
   --qiskit-src ../qiskit-swap-absorption-before \
+  --results results/results_before_fixture_selection.jsonl \
   --inputs-dir results/baseline_inputs \
   --out results/baseline_diagnostics.json
 ```
@@ -154,6 +155,7 @@ To reproduce the five newer-checkout controls with absorption disabled:
 ```bash
 ../qiskit-evolved/.venv/bin/python diagnose_baseline.py \
   --qiskit-src ../qiskit-swap-absorption \
+  --results results/results_before_fixture_selection.jsonl \
   --inputs-dir results/baseline_inputs \
   --representatives --disable-absorption \
   --out results/baseline_candidate_disabled_controls.json
@@ -168,6 +170,6 @@ Omit `--disable-absorption` and use `--out results/baseline_candidate_enabled_co
 | Baseline | `d21180442265c1788a786a8cb5e2f52a0feaa06b490e72a0026cf18e09812472` |
 | With absorption | `627034a679e9e709e36d8e4b5726a78731abc4c126622e7b884364f6bfd058f8` |
 
-The 10-qubit checks retained the original settings: a bidirectional line, trivial identity initial layout, SABRE routing with the listed seed, translator translation, `rz/sx/x/cx` basis, `approximation_degree=1.0`, and `qubits_initially_zero=False`. Full provenance and input hashes are included in the diagnostic JSON files. This investigation added evidence and reproducers; it did not patch either Qiskit checkout or change the validation exclusions.
+The 10-qubit checks retained the original settings: a bidirectional line, trivial identity initial layout, SABRE routing with the listed seed, translator translation, `rz/sx/x/cx` basis, `approximation_degree=1.0`, and `qubits_initially_zero=False`. Full provenance and input hashes are included in the diagnostic JSON files. This investigation added evidence and reproducers without patching either Qiskit checkout. The later fixture selection preserves these historical findings separately from the active validation report.
 
 **Recommended follow-up.** For a comparison that isolates the absorption commit, use its immediate parent as the baseline, or update the older baseline to include the known synthesis correction and rebuild it. Then rerun the full validation before restoring excluded cases. Keep the phase-sensitive check: replacing it with `Operator.equiv` would conceal this defect. If reporting the issue upstream, reference the existing fix and these exact revisions rather than presenting it as an unreported defect in current Qiskit.

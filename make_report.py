@@ -41,22 +41,6 @@ def case_passed(record):
     )
 
 
-def valid_exclusion(record):
-    """Only a fully checked baseline operator mismatch can remove a matrix entry."""
-    return (
-        record.get("passed") is False and record.get("baseline_passed") is False
-        and record.get("reason") == "baseline_operator_mismatch"
-        and record.get("error") == "Baseline operator mismatch"
-        and sha256(record.get("input_sha256"))
-        and record.get("input_sha256") == record.get("baseline_input_sha256")
-        and all(type(record.get(key)) is int and record[key] >= 0
-                for key in ("baseline_depth", "baseline_two_qubit_gates"))
-        and permutation(record.get("baseline_final_permutation"))
-        and record.get("absorption_runs", 0) == 0
-        and record.get("absorption_moves", 0) == 0
-    )
-
-
 def build_report(records, results_path):
     """Validate the complete case matrix and return ``(success, Markdown)``."""
     if not all(isinstance(r, dict) for r in records):
@@ -79,7 +63,7 @@ def build_report(records, results_path):
     fixtures, seeds, levels = env["fixtures"], env["seeds"], env["optimization_levels"]
     if not (
         isinstance(fixtures, list) and all(isinstance(f, str) for f in fixtures)
-        and len(fixtures) == len(set(fixtures)) == 16
+        and len(fixtures) == len(set(fixtures)) == 11
         and isinstance(seeds, list) and seeds
         and all(type(s) is int and 0 <= s < 2**64 for s in seeds)
         and len(seeds) == len(set(seeds))
@@ -92,22 +76,19 @@ def build_report(records, results_path):
                     layout_method="trivial", routing_method="sabre", translation_method="translator",
                     approximation_degree=1.0, qubits_initially_zero=False)
     cases = [r for r in records if r.get("record") == "case"]
-    excluded = [r for r in records if r.get("record") == "excluded_case"]
     checks = [r for r in records if r.get("record") == "self_check"]
     features = [r for r in records if r.get("record") == "feature_check"]
     coverage = [r for r in records if r.get("record") == "coverage"]
     expected = Counter((f, s, level) for f in fixtures for s in seeds for level in levels)
     complete = (
         provenance and all(env.get(key) == value for key, value in settings.items())
-        and len(records) == 1 + len(cases) + len(excluded) + len(checks) + len(features) + len(coverage)
+        and len(records) == 1 + len(cases) + len(checks) + len(features) + len(coverage)
         and Counter((r.get("fixture"), r.get("seed"), r.get("optimization_level"))
-                    for r in cases + excluded) == expected
+                    for r in cases) == expected
         and Counter((r.get("name"), r.get("optimization_level")) for r in checks)
         == Counter((name, level) for name in CHECKS for level in levels)
         and Counter(r.get("name") for r in features) == Counter(FEATURE_CHECKS)
         and Counter(r.get("optimization_level") for r in coverage) == Counter(levels)
-        and all(valid_exclusion(rec) for rec in excluded)
-        and all(any(r.get("optimization_level") == level for r in cases) for level in levels)
     )
     complete &= all(case_passed(rec) for rec in cases)
     for rec in coverage:
@@ -126,11 +107,9 @@ def build_report(records, results_path):
         )
     failed = [r for r in cases + checks + features + coverage if not passed(r)]
     ok = complete and not failed
-    retained_expected = sum(expected.values()) - len(excluded)
     lines = [
         "# SWAP absorption correctness", "",
-        f"**{'PASS' if ok else 'FAIL'}** — {sum(map(case_passed, cases))}/{retained_expected} "
-        f"cases; {len(excluded)} excluded baseline cases; "
+        f"**{'PASS' if ok else 'FAIL'}** — {sum(map(case_passed, cases))}/{sum(expected.values())} cases; "
         f"{sum(map(passed, checks))}/{len(CHECKS) * len(levels)} negative self-checks; "
         f"{sum(map(passed, features))}/{len(FEATURE_CHECKS)} focused checks.", "",
         f"Revision: `{env['sha']}`. Seeds: `{seeds}`. Optimization levels: `{levels}`.",
@@ -141,20 +120,18 @@ def build_report(records, results_path):
         f"Baseline source: `{baseline.get('qiskit_source', '?')}`.",
         f"Baseline extension: `{baseline.get('accelerate_file', '?')}`.",
         f"Baseline extension SHA-256: `{baseline.get('accelerate_sha256', '?')}`.", "",
-        "16 circuits, 10 qubits each; full preset pipeline, bidirectional line, trivial initial "
+        f"{len(fixtures)} circuits, 10 qubits each; full preset pipeline, bidirectional line, trivial initial "
         "layout, SABRE routing, and the `rz`, `sx`, `x`, `cx` basis. Exact synthesis; arbitrary "
         "input states (`qubits_initially_zero=False`).",
         "Both outputs must match the same original unitary (layout-aware, global phase kept, default "
         "tolerances), preserve width and layout metadata, and satisfy connectivity and basis "
-        "constraints. Every retained case must select absorption moves and produce a structurally different "
+        "constraints. Every case must select absorption moves and produce a structurally different "
         "circuit from both the baseline and the current checkout with absorption disabled. "
         "DAG comparison ignores circuit names and the ordering of independent operations. "
         "Phase-only and layout-only changes do not count as changes to gates. "
         "Matching input SHA-256 values verify that both checkouts received the same circuit. "
-        "Cases where the baseline has an incorrect unitary are excluded before testing the optimized "
-        "checkout. Every requested circuit/seed/level combination must have a result or an "
-        "explicit baseline exclusion.", "",
-        "Per cell: passing cases; cases changed from baseline, out of retained seeds; excluded seeds.", "",
+        "Every requested circuit/seed/level combination must have a passing result.", "",
+        "Per cell: passing cases; cases changed from baseline, out of all requested seeds.", "",
         "| Circuit | " + " | ".join(f"Level {level}" for level in levels) + " |",
         "|---|" + "---|" * len(levels),
     ]
@@ -165,37 +142,22 @@ def build_report(records, results_path):
                         and r.get("optimization_level") == level]
             passing = sum(map(case_passed, selected))
             changed = sum(r.get("circuit_changed") is True for r in selected)
-            excluded_count = sum(r.get("fixture") == fixture and r.get("optimization_level") == level
-                                 for r in excluded)
-            retained = len(seeds) - excluded_count
-            cells.append(f"{passing}/{retained} pass; {changed}/{retained} changed; "
-                         f"{excluded_count} excluded")
+            cells.append(f"{passing}/{len(seeds)} pass; {changed}/{len(seeds)} changed")
         lines.append(f"| {fixture} | " + " | ".join(cells) + " |")
-    if excluded:
-        lines += ["", "Excluded cases: the baseline output does not match the original unitary. "
-                  "These cases do not count as passing validation cases.", "",
-                  "| Circuit | Level | Seeds | Reason |", "|---|---|---|---|"]
-        for fixture in fixtures:
-            for level in levels:
-                failed_seeds = [s for s in seeds if any(
-                    r.get("fixture") == fixture and r.get("optimization_level") == level
-                    and r.get("seed") == s for r in excluded)]
-                if failed_seeds:
-                    lines.append(f"| {fixture} | {level} | `{failed_seeds}` | Baseline operator mismatch |")
-    lines += ["", "Actual changes and moves (required in every retained case):", "",
+    lines += ["", "Actual changes and moves (required in every case):", "",
               "| Level | Changed vs baseline | Changed vs absorption disabled | Cases with moves "
               "| Moves | Pass executions | Coverage |",
               "|---|---|---|---|---|---|---|"]
     for level in levels:
         matches = [r for r in coverage if r.get("optimization_level") == level]
         rec = matches[0] if len(matches) == 1 else {}
-        total = sum(r.get("optimization_level") == level for r in cases)
+        total = len(fixtures) * len(seeds)
         lines.append(f"| {level} | {rec.get('cases_changed', '?')}/{total} | "
                      f"{rec.get('cases_absorption_changed', '?')}/{total} | "
                      f"{rec.get('cases_with_moves', '?')} | "
                      f"{rec.get('absorption_moves', '?')} | {rec.get('absorption_runs', '?')} | "
                      f"{'PASS' if passed(rec) else 'FAIL'} |")
-    lines += ["", "Totals across retained cases (baseline → with absorption):", "",
+    lines += ["", "Totals across all cases (baseline → with absorption):", "",
               "| Level | Two-qubit gates | Circuit depths (sum) |", "|---|---|---|"]
     for level in levels:
         selected = [r for r in cases if r.get("optimization_level") == level]
@@ -224,12 +186,7 @@ def build_report(records, results_path):
         lines.append(f"- `{name}`: {'PASS' if good else 'FAIL'}.")
     if not complete:
         lines += ["", "FAIL: missing, duplicate, or unexpected results/settings, missing baseline "
-                  "provenance, invalid exclusions, no retained cases at a requested level, "
-                  "or incomplete per-case change/move evidence."]
-    for rec in excluded:
-        if not valid_exclusion(rec):
-            lines += ["", f"FAIL: invalid exclusion for {rec.get('fixture')} seed {rec.get('seed')} "
-                      f"level {rec.get('optimization_level')}."]
+                  "provenance, or incomplete per-case change/move evidence."]
     for rec in cases:
         if passed(rec) and not case_passed(rec):
             lines += ["", f"FAIL: {rec.get('fixture')} seed {rec.get('seed')} "

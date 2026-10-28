@@ -227,12 +227,12 @@ class BaselineSubprocessTests(unittest.TestCase):
             transpile.assert_not_called()
 
 
-class BaselineExclusionTests(unittest.TestCase):
-    def test_only_baseline_unitary_mismatch_is_excluded(self):
+class CaseFailureTests(unittest.TestCase):
+    def test_baseline_and_candidate_errors_fail_required_cases(self):
         scenarios = (
-            (OperatorMismatch("bad baseline unitary"), None, "excluded_case"),
-            (ValueError("bad baseline layout"), None, "case"),
-            (None, OperatorMismatch("bad candidate unitary"), "case"),
+            (OperatorMismatch("bad baseline unitary"), None, "Baseline operator mismatch"),
+            (ValueError("bad baseline layout"), None, "bad baseline layout"),
+            (None, OperatorMismatch("bad candidate unitary"), "bad candidate unitary"),
         )
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -254,7 +254,7 @@ class BaselineExclusionTests(unittest.TestCase):
             modules = {module.__name__: module for module in (qiskit, quantum_info, transpiler, presets)}
             argv = ["run_validation.py", "--seeds", "0", "--optimization-levels", "2",
                     "--out", str(output)]
-            for baseline_error, candidate_error, expected_kind in scenarios:
+            for baseline_error, candidate_error, expected_error in scenarios:
                 with self.subTest(baseline=baseline_error, candidate=candidate_error):
                     candidate = Mock(side_effect=candidate_error)
                     with (patch.dict(sys.modules, modules), patch("sys.argv", argv),
@@ -268,18 +268,17 @@ class BaselineExclusionTests(unittest.TestCase):
                                          transpile_and_check=candidate,
                                          self_checks=Mock(return_value=[]),
                                          feature_checks=Mock(return_value=[]))):
-                        # A suite with no eligible passing cases must still fail coverage.
+                        # A failed required case must fail both the run and coverage.
                         self.assertEqual(validation_main(), 1)
                     records = [json.loads(line) for line in output.read_text().splitlines()]
                     case, = [rec for rec in records if rec["record"] in ("case", "excluded_case")]
-                    self.assertEqual(case["record"], expected_kind)
+                    self.assertEqual(case["record"], "case")
                     self.assertIs(case["passed"], False)
                     self.assertEqual(candidate.call_count, int(baseline_error is None))
-                    if expected_kind == "excluded_case":
-                        self.assertEqual(case["reason"], "baseline_operator_mismatch")
-                    else:
-                        self.assertNotIn("reason", case)
-                        self.assertIn(str(baseline_error or candidate_error), case["error"])
+                    self.assertNotIn("reason", case)
+                    self.assertIn(expected_error, case["error"])
+                    coverage, = [rec for rec in records if rec["record"] == "coverage"]
+                    self.assertIs(coverage["passed"], False)
 
 
 class SourceRevisionTests(unittest.TestCase):
