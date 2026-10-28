@@ -1,80 +1,108 @@
-# SABRE wait-time correctness
+# SWAP-absorption correctness
 
-Run 16 deterministic ten-qubit circuits with `wait_time`, using routing seeds
-`0 1 42 2 7 123`: **96 cases**, plus two negative self-checks.
-Each routed output must match the original circuit's unitary, including global
-phase with Qiskit's default tolerances, and preserve width, layout metadata,
-and connectivity on a bidirectional line. Routing uses a trivial layout and one trial.
+Validate the SWAP-absorption change in
+`../qiskit-swap-absorption` (commit
+`6b5145d2e94799ba3b01494a706537efc2925242`). The pass runs at the start of
+**translation at optimization levels 2 and 3**, so this suite runs the complete
+preset pipeline, including routing, translation, and optimization.
 
-## Run using the existing release build
+The default matrix is 16 deterministic ten-qubit circuits × six transpiler
+seeds (`0 1 42 2 7 123`) × two optimization levels: **192 cases**.
+Every output must match the original circuit's full unitary, including global
+phase with Qiskit's default tolerances, and preserve width and valid layout
+metadata. Every physical gate must satisfy the bidirectional line's connectivity
+and the requested `rz`, `sx`, `x`, `cx` basis.
 
-From this repository:
+## Run with the existing local build
+
+From this repository, the existing environment in `qiskit-evolved` can supply
+Python and dependencies while `--qiskit-src` selects the new Qiskit checkout:
 
 ```bash
-../qiskit-evolved/.venv/bin/python run_validation.py --qiskit-src ../qiskit-evolved
+../qiskit-evolved/.venv/bin/python run_validation.py --qiskit-src ../qiskit-swap-absorption
 ../qiskit-evolved/.venv/bin/python make_report.py
 ```
 
-Results go to `results/results.jsonl`; the short summary goes to `report.md`.
-Both scripts return nonzero on failure. The reporter also rejects incomplete
-or duplicate results. Exceptions, including Python-visible Rust panics, are failures.
+`--qiskit-src` defaults to the sibling `qiskit-swap-absorption` checkout. Both
+Qiskit's Python package and its compiled `_accelerate` extension must load from
+that tree. The latest commit adds a Rust commutation-table API, so an extension
+built from older source is insufficient even if importing Qiskit succeeds.
 
-## Self-checks
+Results go to `results/results.jsonl`; the summary goes to `report.md`. Both
+scripts return nonzero on failure. The reporter rejects missing, duplicate, or
+unexpected cases and checks, including results from the old wait-time suite.
+Exceptions, including Python-visible Rust panics, count as failures.
 
-The two self-checks are negative controls: they show the unitary comparison is
-strong enough to fail. Both start from the first passing case whose final
-permutation is not the identity (with an identity permutation, ignoring the
-layout would change nothing and the first check would be meaningless), break
-it on purpose, and pass only if the broken circuit no longer matches the reference:
+Reporter integrity tests run with `python3 -m unittest test_make_report` and do
+not require Qiskit.
 
-- **Ignored layout** (`ignoring_final_layout_must_fail`): build the operator with
-  `ignore_set_layout=True`, so the qubit permutation from routing SWAPs is not
-  undone. This confirms the layout metadata matters to the comparison.
-- **Extra X gate** (`extra_x_gate_must_fail`): append an X gate on physical
-  qubit 0 while still using the layout. This confirms a small gate-level
-  change is caught.
+For a smaller run or separate output files:
 
-If either broken circuit still matched, the checker would be too weak to trust,
-so the run fails.
+```bash
+../qiskit-evolved/.venv/bin/python run_validation.py --seeds 0 --optimization-levels 2 3 --out /tmp/swap-smoke.jsonl
+../qiskit-evolved/.venv/bin/python make_report.py --results /tmp/swap-smoke.jsonl --out /tmp/swap-smoke.md
+```
+
+## What is checked
+
+Each case uses an explicit identity initial layout, SABRE routing, the built-in
+`translator` stage, and exact synthesis (`approximation_degree=1.0`).
+`qubits_initially_zero=False` prevents optimizations from relying on a zero input
+state, because the comparison covers every input state. The runner enforces
+`QISKIT_PARALLEL=FALSE` and records the preset's routing trial count (normally 20
+at both levels; Qiskit's `sabre_all_threads` setting can increase it).
+
+A pass callback confirms `_AbsorbIntoSwaps` executes in every case. An observing
+wrapper around its move finder records the moves selected by the actual run,
+without changing them. At least one move must occur in the benchmark matrix at
+**each requested optimization level**, so an inactive pass cannot pass the suite.
+Two-qubit gate counts and final depths are diagnostic metrics; this pass does not
+guarantee that either decreases for every circuit.
+
+There are two negative controls at each requested level, using that level's
+first passing result with a nonidentity final permutation:
+
+- **Ignored layout** (`ignoring_final_layout_must_fail`): compare with
+  `ignore_set_layout=True`, without undoing the routing permutation.
+- **Extra X gate** (`extra_x_gate_must_fail`): append an X on physical qubit 0,
+  while still applying the layout in the comparison.
+
+Each control passes only when its deliberate error is detected. Separate small
+feature checks exercise eligible moves and blocking conditions, preserve the
+full unitary, and verify level gating for both built-in translation methods.
+See `swap_absorption_checks.py` for the complete list.
 
 ## Circuits
 
-The original six are QFT, a random circuit of depth 60, a four-bit ripple adder,
-a ring circuit, quantum volume, and DTC evolution.
-The ten additions are random circuits of depths 20 and 40, another quantum-volume
-circuit, Bernstein–Vazirani and BV-like circuits, Trotter evolution, QAOA,
-Grover, multi-controlled X, and modular addition.
+The 16 fixtures are QFT, random circuits of depths 20/40/60, a four-bit ripple
+adder, a ring circuit, two quantum-volume instances, DTC evolution,
+Bernstein–Vazirani and BV-like circuits, Trotter evolution, QAOA, Grover,
+multi-controlled X, and modular addition.
 
-All builders come from `qiskit-evolved/test/benchmarks`, except the small
+Builders come from the selected checkout's `test/benchmarks`, except the small
 quantum-volume builder, which uses one seeded generator for both pairings and
-unitaries. Fixture seeds are fixed in `fixtures()` and are independent of routing
+unitaries. Fixture seeds are fixed in `fixtures()` and independent of transpiler
 seeds. Trotter and QAOA use two repetitions; QAOA parameters are bound to
 `0.1, 0.2, …` in Qiskit's parameter order. Final measurements are removed and
 instructions on three or more qubits are expanded before building the reference.
 
 ## Fresh release build
 
-Requires Python 3.10+ and the Qiskit build toolchain:
+Use Python 3.10+ and the Qiskit build toolchain. To build an isolated copy inside
+this repository:
 
 ```bash
 mkdir -p qiskit-src
-git -C ../qiskit-evolved archive HEAD | tar -x -C qiskit-src
-git -C ../qiskit-evolved rev-parse HEAD > qiskit-src/REVISION
+git -C ../qiskit-swap-absorption archive HEAD | tar -x -C qiskit-src
+git -C ../qiskit-swap-absorption rev-parse HEAD > qiskit-src/REVISION
 ~/.pyenv/versions/3.11.8/bin/python -m venv .venv
 (cd qiskit-src && QISKIT_BUILD_PROFILE=release ../.venv/bin/pip install -e .)
 .venv/bin/pip install 'ddt>=1.2.0'
-.venv/bin/python run_validation.py && .venv/bin/python make_report.py
+.venv/bin/python run_validation.py --qiskit-src qiskit-src
+.venv/bin/python make_report.py
 ```
 
-`ddt` is needed for the benchmark imports. `--qiskit-src` defaults to the
-`qiskit-src` directory beside the runner. Override routing seeds with `--seeds`;
-override output paths with `--out` and the reporter's input with `--results`.
-The runner enforces `QISKIT_PARALLEL=FALSE`.
-
-The recorded run uses revision `319fa5fa703bc924008db812f5ddfec6b56c38f7`, built
-from `qiskit-evolved` with
-`QISKIT_BUILD_PROFILE=release .venv/bin/python setup.py build_rust --inplace --release`.
-The loaded extension matches the local release artifact (SHA-256
-`b019b47bb19dc956747134a85e33e467136614b7c2749ef54696ed4c4df6a5ff`).
-Commit results and report together. These are routing checks for the selected
-circuits and seeds, not a general correctness proof.
+`ddt` is needed for benchmark imports. Each run records its source revision,
+loaded extension path and SHA-256, versions, settings, and UTC timestamp.
+Commit results and report together. These checks validate the selected circuits,
+seeds, and integration paths; they are not a general correctness proof.

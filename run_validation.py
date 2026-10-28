@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-"""Check wait-time SABRE against the original unitary on 16 ten-qubit circuits."""
+"""Validate SWAP absorption in Qiskit preset optimization levels 2 and 3."""
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -8,9 +9,14 @@ import sys
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
+from unittest.mock import patch
+
+from swap_absorption_checks import feature_checks
 
 os.environ["QISKIT_PARALLEL"] = "FALSE"
 SEEDS = [0, 1, 42, 2, 7, 123]
+LEVELS = [2, 3]
+BASIS_GATES = ["rz", "sx", "x", "cx"]
 CHECKS = ("ignoring_final_layout_must_fail", "extra_x_gate_must_fail")
 
 
@@ -106,233 +112,180 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def route_and_check(qc, reference, cmap, seed):
-    """Route ``qc`` with wait-time SABRE and check that the result is correct.
+def transpile_and_check(qc, reference, cmap, seed, level, metrics):
+    """Run the complete preset pipeline and verify its full, layout-aware unitary.
 
-    Raises ``ValueError`` if any check fails; otherwise returns the routed circuit.
-    The checks are: the width is unchanged, layout metadata is present, every
-    two-qubit gate sits on a coupling-map edge, and the routed circuit's unitary
-    (with its layout undone) equals ``reference``.
+    Observe the real move finder without changing its return value. A callback
+    separately confirms that the pass ran, including invocations with no SWAPs.
+    Metrics remain available to the caller even if a later correctness check fails.
     """
-    # Imported lazily so the Qiskit from --qiskit-src is used (see main()).
-    # Operator turns a circuit into its full unitary matrix.
     from qiskit.quantum_info import Operator
-    # PassManager runs a list of transpiler passes in order.
-    from qiskit.transpiler import PassManager
-    # The three passes that make up this layout-plus-routing pipeline.
-    from qiskit.transpiler.passes import ApplyLayout, SabreSwap, TrivialLayout
+    from qiskit.transpiler import generate_preset_pass_manager
+    from qiskit.transpiler.preset_passmanagers import _swap_absorption
 
-    # TrivialLayout maps virtual qubit i to physical qubit i. ApplyLayout rewrites
-    # the circuit onto physical qubits and records that initial layout.
-    # SabreSwap inserts SWAPs so every two-qubit gate is on an edge, using the
-    # wait-time heuristic under test, this routing seed and a single trial, so
-    # each run is deterministic. It also records the final qubit permutation.
-    # qc.copy() keeps the shared prepared circuit unchanged across seeds.
-    out = PassManager([TrivialLayout(cmap), ApplyLayout(),
-                       SabreSwap(cmap, heuristic="wait_time", seed=seed, trials=1)]).run(qc.copy())
-    # The line has exactly 10 physical qubits and the input has 10, so no
-    # ancillas should be added and no qubits dropped.
-    require(out.num_qubits == 10, "Output width changed")
-    # The TranspileLayout and both of its layouts must exist. Without them the
-    # operator check below could not undo the routing permutation and would
-    # compare the wrong thing.
-    require(out.layout is not None and out.layout.initial_layout is not None
-            and out.layout.final_layout is not None, "Missing layout metadata")
-    # Set of allowed (control, target) physical pairs. from_line() is bidirectional,
-    # so both (i, i+1) and (i+1, i) are present and gate direction does not matter.
+    find_moves = _swap_absorption._find_moves
+
+    def observe_moves(dag):
+        result = find_moves(dag)
+        metrics["absorption_moves"] += len(result[2])
+        return result
+
+    def callback(pass_, dag, **_):
+        if isinstance(pass_, _swap_absorption._AbsorbIntoSwaps):
+            metrics["absorption_runs"] += 1
+            metrics["absorption_swaps_seen"] += dag.count_ops().get("swap", 0)
+
+    pm = generate_preset_pass_manager(
+        optimization_level=level, coupling_map=cmap, basis_gates=BASIS_GATES,
+        initial_layout=list(range(qc.num_qubits)), layout_method="trivial",
+        routing_method="sabre", translation_method="translator",
+        seed_transpiler=seed, approximation_degree=1.0, qubits_initially_zero=False,
+    )
+    with patch.object(_swap_absorption, "_find_moves", side_effect=observe_moves):
+        out = pm.run(qc.copy(), callback=callback)
+
+    require(metrics["absorption_runs"] > 0, "SWAP absorption pass did not execute")
+    require(out.num_qubits == qc.num_qubits == 10, "Output width changed")
+    require(out.layout is not None and out.layout.initial_layout is not None,
+            "Missing layout metadata")
+    # Routing may legitimately be skipped when a circuit already fits the line;
+    # in that case final_layout=None represents the identity permutation.
+    require(out.layout.initial_index_layout() == list(range(10)), "Initial layout changed")
+    require(sorted(out.layout.final_index_layout()) == list(range(10)),
+            "Invalid final layout permutation")
     edges = set(map(tuple, cmap.get_edges()))
-    # Check connectivity instruction by instruction.
     for inst in out.data:
-        # Skip directives such as barriers: they are not physical operations
-        # and may legitimately span non-adjacent qubits.
         if inst.operation._directive:
             continue
-        # Physical qubit indices this instruction acts on in the routed circuit.
         qubits = tuple(out.find_bit(q).index for q in inst.qubits)
-        # The gate must act on at most two qubits, and a two-qubit gate must act on
-        # a coupled pair, in the order it appears in `edges`.
         require(len(qubits) <= 2 and (len(qubits) != 2 or qubits in edges),
                 f"Unrouted gate: {inst.operation.name}{qubits}")
-    # Operator.from_circuit uses out.layout to undo the initial layout and the
-    # final SWAP permutation, giving the unitary in the original qubit order.
-    # Operator equality uses np.allclose with default tolerances and no phase
-    # fixing, so the global phase must match too.
+        require(inst.operation.name in BASIS_GATES,
+                f"Gate outside requested basis: {inst.operation.name}")
+    # Equality includes global phase; do not use Operator.equiv here.
     require(Operator.from_circuit(out) == reference, "Operator mismatch")
-    # Hand the routed circuit back so the caller can record its final permutation.
+    metrics.update(depth=out.depth(), two_qubit_gates=sum(
+        len(inst.qubits) == 2 and not inst.operation._directive for inst in out.data))
     return out
 
 
-def self_checks(sample):
-    """Mutate a known-good routed circuit and confirm the checker catches each error.
-
-    ``sample`` is ``(routed_circuit, reference_operator, fixture_name, seed)`` from a
-    passing case whose final permutation is not the identity, or ``None`` if there
-    was no such case. Returns one ``self_check`` record per entry in ``CHECKS``. A
-    record passes only if the deliberately broken circuit no longer matches the
-    reference, which shows the operator comparison can actually fail.
-    """
-    # Imported lazily so the Qiskit from --qiskit-src is used (see main()).
+def self_checks(sample, level):
+    """Confirm that ignoring layout and adding an X each break a passing result."""
     from qiskit.quantum_info import Operator
 
-    # One record per self-check, in CHECKS order.
     results = []
-    # CHECKS[0] ignores the layout metadata; CHECKS[1] adds an extra X gate.
     for name in CHECKS:
-        # Start as failed; set to passed only once the mutation is detected.
-        rec = {"record": "self_check", "name": name, "passed": False}
+        rec = dict(record="self_check", name=name, optimization_level=level, passed=False)
         try:
-            # A non-identity final permutation is required. With a trivial initial
-            # layout and an identity final layout, ignoring the layout changes
-            # nothing, so the first check would pass for no reason.
             require(sample is not None, "No passing case with a changed final permutation")
-            # Unpack the routed circuit, its reference unitary, and where it came from.
             out, reference, fixture, seed = sample
-            # Record which case was mutated, for traceability in the results file.
             rec.update(fixture=fixture, seed=seed)
-            # Work on a copy so each check starts from the unmodified routed circuit.
             wrong = out.copy()
-            # True for the "ignore final layout" check, False for the "extra X" check.
             ignore_layout = name == CHECKS[0]
-            # The "extra X" check appends an X gate on physical qubit 0. That changes
-            # the unitary, while the layout metadata is still used.
             if not ignore_layout:
                 wrong.x(0)
-            # Build the unitary from the broken circuit. For the first check,
-            # ignore_set_layout=True skips undoing the SWAP permutation; for the
-            # second, the layout is used but the extra X is there. Either way it
-            # must differ from the reference, or the checker is too weak.
             require(Operator.from_circuit(wrong, ignore_set_layout=ignore_layout) != reference,
                     "Deliberate error was not detected")
-            # The deliberate error was caught, so the self-check passes.
             rec["passed"] = True
-        # Let Ctrl-C and sys.exit() stop the run instead of becoming a failed record.
         except (KeyboardInterrupt, SystemExit):
             raise
-        # Record any other error, including PyO3's PanicException, which derives
-        # from BaseException rather than Exception.
         except BaseException as exc:  # Includes Python-visible Rust panics.
             rec["error"] = repr(exc)
-        # Keep the record whether it passed or failed.
         results.append(rec)
-    # main() appends these after the per-case records.
     return results
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--qiskit-src", type=Path, default=Path(__file__).parent / "qiskit-src")
+    parser.add_argument("--qiskit-src", type=Path,
+                        default=Path(__file__).resolve().parent.parent / "qiskit-swap-absorption")
     parser.add_argument("--seeds", type=int, nargs="+", default=SEEDS)
+    parser.add_argument("--optimization-levels", type=int, nargs="+", choices=LEVELS, default=LEVELS)
     parser.add_argument("--out", type=Path, default=Path("results/results.jsonl"))
     args = parser.parse_args()
     if len(set(args.seeds)) != len(args.seeds) or any(s < 0 or s >= 2**64 for s in args.seeds):
         parser.error("Seeds must be distinct unsigned 64-bit integers")
+    if len(set(args.optimization_levels)) != len(args.optimization_levels):
+        parser.error("Optimization levels must be distinct")
     source = args.qiskit_src.resolve()
+    require((source / "qiskit").is_dir(), f"Qiskit source directory not found: {source}")
     sys.path.insert(0, str(source))
     import qiskit
     import qiskit._accelerate
     from qiskit.quantum_info import Operator
     from qiskit.transpiler import CouplingMap, PassManager
     from qiskit.transpiler.passes import Unroll3qOrMore
+    from qiskit.transpiler.preset_passmanagers import builtin_plugins
 
-    # Confirm that both the pure-Python package and the compiled Rust extension
-    # were loaded from --qiskit-src and not from another installed Qiskit. If they
-    # were not, the run would validate the wrong code.
+    # Refuse to validate an unrelated installed package or compiled extension.
     for module in (qiskit, qiskit._accelerate):
         require(Path(module.__file__).resolve().is_relative_to(source), "Wrong Qiskit source")
-    # A tree exported with `git archive` has no .git directory, so its commit SHA
-    # is written to a REVISION file at export time (see README).
     revision = source / "REVISION"
-    # Use REVISION if present; otherwise ask git for the checkout's HEAD commit.
     sha = (revision.read_text().strip() if revision.exists() else
            subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip())
-    # Fixture name -> builder. Called only now, after sys.path points at the source tree.
     builders = fixtures()
-    # The first record holds provenance: exact Qiskit commit and version, which
-    # compiled extension was loaded, Python version, UTC run time, and the
-    # parameters of this run (fixtures, seeds, heuristic, coupling map, trials).
-    records = [dict(record="environment", sha=sha, qiskit_version=qiskit.__version__,
-                    accelerate_file=qiskit._accelerate.__file__, python=sys.version.split()[0],
-                    timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                    fixtures=list(builders), seeds=args.seeds, heuristic="wait_time",
-                    coupling_map="line(10)", trials=1)]
-    # Bidirectional 10-qubit line 0-1-...-9, the hardest connectivity for routing.
-    # `sample` will hold the first passing case with a non-identity final
-    # permutation, for use by self_checks().
-    cmap, sample = CouplingMap.from_line(10), None
-    # Each fixture is prepared once and then routed with every seed.
+    records = [dict(
+        record="environment", schema_version=2, sha=sha, qiskit_version=qiskit.__version__,
+        qiskit_source=str(source), accelerate_file=qiskit._accelerate.__file__,
+        accelerate_sha256=hashlib.sha256(Path(qiskit._accelerate.__file__).read_bytes()).hexdigest(),
+        python=sys.version.split()[0], timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        fixtures=list(builders), seeds=args.seeds, optimization_levels=args.optimization_levels,
+        basis_gates=BASIS_GATES, coupling_map="line(10)", layout_method="trivial",
+        routing_method="sabre", translation_method="translator", approximation_degree=1.0,
+        qubits_initially_zero=False, routing_trials=builtin_plugins._get_trial_count(20),
+    )]
+    cmap = CouplingMap.from_line(10)
+    samples = dict.fromkeys(args.optimization_levels)
     for name, builder in builders.items():
-        # Preparation error message for this fixture, if any.
         error = None
-        # Progress output; flush so it shows immediately even when piped.
         print(f"Preparing {name}", flush=True)
         try:
-            # Build the circuit and drop its final measurements (and any classical
-            # registers that become unused), leaving a pure unitary. inplace=False
-            # returns a new circuit.
             qc = builder().remove_final_measurements(inplace=False)
-            # Bind free parameters (only QAOA has any) to 0.1, 0.2, ... in Qiskit's
-            # parameter order. For a circuit without parameters this binds nothing.
             qc = qc.assign_parameters([0.1 * (i + 1) for i in range(qc.num_parameters)])
-            # Expand instructions on three or more qubits (Toffolis, MCX, etc.) into
-            # one- and two-qubit gates, so routing on a line is possible and the
-            # connectivity check means something.
             qc = PassManager([Unroll3qOrMore()]).run(qc)
-            # Sanity-check the prepared input: exactly 10 qubits (to match the line)
-            # and nothing wider than two qubits.
             require(qc.num_qubits == 10 and all(len(i.qubits) <= 2 for i in qc.data),
                     "Expected 10 qubits and only one- or two-qubit instructions")
-            # Reference unitary (1024x1024) of the unrouted circuit. Every routed
-            # output for this fixture is compared against it.
             reference = Operator.from_circuit(qc)
-        # Let Ctrl-C and sys.exit() stop the run.
         except (KeyboardInterrupt, SystemExit):
             raise
-        # Any other preparation error is kept. It is reported as a failure for each
-        # seed below instead of crashing the run.
         except BaseException as exc:
             error = f"Preparation failed: {exc!r}"
-        # Route the same prepared circuit once per routing seed.
-        for seed in args.seeds:
-            # Print the case label; PASS/FAIL is added to the same line below.
-            print(f"  seed {seed}: ", end="", flush=True)
-            # Case record, failed by default until every check passes.
-            rec = dict(record="case", fixture=name, seed=seed, passed=False)
-            try:
-                # If preparation failed, raise its message so this case records it.
-                require(error is None, error)
-                # Route with wait-time SABRE and run all correctness checks; raises on failure.
-                out = route_and_check(qc, reference, cmap, seed)
-                # Entry i is the physical qubit holding original qubit i at the end.
-                # It is the identity only if the SWAPs cancel out overall.
-                final = out.layout.final_index_layout()
-                # All checks passed: mark the case and keep the permutation for the report.
-                rec.update(passed=True, final_permutation=final)
-                # Keep the first passing case whose SWAPs left a real permutation; the
-                # "ignore final layout" self-check needs one to be meaningful.
-                if sample is None and final != list(range(10)):
-                    sample = (out, reference, name, seed)
-            # Let Ctrl-C and sys.exit() stop the run.
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            # Record any failed check or crash, including Rust panics.
-            except BaseException as exc:
-                rec["error"] = repr(exc)
-            # Keep the record whether it passed or failed.
-            records.append(rec)
-            # Finish the progress line with the outcome.
-            print("PASS" if rec["passed"] else f"FAIL {rec['error']}", flush=True)
-    # Add the two negative self-checks, which show the checker can detect errors.
-    records += self_checks(sample)
-    # Create the output directory (results/ by default) if it does not exist.
+        for level in args.optimization_levels:
+            for seed in args.seeds:
+                print(f"  level {level}, seed {seed}: ", end="", flush=True)
+                rec = dict(record="case", fixture=name, seed=seed, optimization_level=level,
+                           passed=False, absorption_runs=0, absorption_moves=0,
+                           absorption_swaps_seen=0)
+                try:
+                    require(error is None, error)
+                    out = transpile_and_check(qc, reference, cmap, seed, level, rec)
+                    final = out.layout.final_index_layout()
+                    rec.update(passed=True, final_permutation=final)
+                    if samples[level] is None and final != list(range(10)):
+                        samples[level] = (out, reference, name, seed)
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as exc:
+                    rec["error"] = repr(exc)
+                records.append(rec)
+                print(f"PASS ({rec['absorption_moves']} moves)" if rec["passed"]
+                      else f"FAIL {rec['error']}", flush=True)
+
+    for level in args.optimization_levels:
+        records += self_checks(samples[level], level)
+        cases = [r for r in records if r["record"] == "case" and r["optimization_level"] == level]
+        moves = sum(r["absorption_moves"] for r in cases)
+        coverage = dict(record="coverage", optimization_level=level, passed=moves > 0,
+                        absorption_moves=moves, absorption_runs=sum(r["absorption_runs"] for r in cases),
+                        cases_with_moves=sum(r["absorption_moves"] > 0 for r in cases))
+        if not coverage["passed"]:
+            coverage["error"] = "No absorption moves observed in the preset pipeline"
+        records.append(coverage)
+    records += feature_checks()
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    # Write JSON Lines: one record per line, read later by make_report.py.
     args.out.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
-    # Count failed cases and self-checks. records[1:] skips the environment
-    # record, which has no "passed" field.
     failed = sum(not r["passed"] for r in records[1:])
-    # One-line summary for the console.
     print(f"{failed} failures; wrote {args.out}")
-    # Exit status: 0 if everything passed, 1 if anything failed.
     return int(failed != 0)
 
 
