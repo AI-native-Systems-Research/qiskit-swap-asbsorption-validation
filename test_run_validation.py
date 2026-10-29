@@ -336,6 +336,42 @@ class CaseValidationTests(unittest.TestCase):
         self.assertTrue(all(rec["record"] != "excluded_case" for rec in records))
 
 
+class ResultOutputTests(unittest.TestCase):
+    def test_initialization_error_or_interruption_invalidates_previous_success(self):
+        from make_report import build_report
+        from test_make_report import complete_records
+
+        previous = complete_records()
+        self.assertTrue(build_report(previous, "previous.jsonl")[0])
+        for error in (ValueError("Qiskit checkout unavailable"), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary) / "results.jsonl"
+                output.write_text("".join(json.dumps(record) + "\n" for record in previous))
+                argv = ["run_validation.py", "--out", str(output)]
+                with (patch("sys.argv", argv),
+                      patch("run_validation.load_source", side_effect=error) as load):
+                    with self.assertRaises(type(error)):
+                        validation_main()
+                load.assert_called_once()
+                records = [json.loads(line) for line in output.read_text().splitlines()]
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0]["record"], "run_status")
+                self.assertIs(records[0]["passed"], False)
+                self.assertIn("Validation did not complete", records[0]["error"])
+                with self.assertRaises(ValueError):
+                    build_report(records, str(output))
+
+    def test_invalid_output_path_fails_before_loading_qiskit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "results.jsonl"
+            output.mkdir()
+            with (patch("sys.argv", ["run_validation.py", "--out", str(output)]),
+                  patch("run_validation.load_source") as load):
+                with self.assertRaises(OSError):
+                    validation_main()
+            load.assert_not_called()
+
+
 class SourceRevisionTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()

@@ -23,12 +23,22 @@ def permutation(value):
             and sorted(value) == list(range(10)))
 
 
+def case_key(record):
+    """Reject bool/float identifiers before Python can equate them with integers."""
+    fixture, seed, level = (record.get(key) for key in ("fixture", "seed", "optimization_level"))
+    if (isinstance(fixture, str) and type(seed) is int and 0 <= seed < 2**64
+            and type(level) is int and level in (2, 3)):
+        return fixture, seed, level
+    return None
+
+
 def case_passed(record):
     """A passing flag alone does not establish correctness or actual absorption."""
     metrics = ("absorption_runs", "absorption_moves", "absorption_swaps_seen", "depth",
                "two_qubit_gates", "disabled_depth", "disabled_two_qubit_gates")
     return (
         passed(record)
+        and case_key(record) is not None
         and all(type(record.get(key)) is int and record[key] >= 0 for key in metrics)
         and record["absorption_runs"] > 0 and record["absorption_moves"] > 0
         and record.get("enabled_passed") is True
@@ -43,6 +53,9 @@ def build_report(records, results_path):
     """Validate the complete case matrix and return ``(success, Markdown)``."""
     if not all(isinstance(r, dict) for r in records):
         raise ValueError("Every result must be a JSON object")
+    for record in records:
+        if record.get("record") == "run_status":
+            raise ValueError(record.get("error") or "Validation did not complete; rerun run_validation.py")
     environments = [r for r in records if r.get("record") == "environment"]
     if len(environments) != 1:
         raise ValueError("Expected exactly one environment record")
@@ -76,35 +89,66 @@ def build_report(records, results_path):
     features = [r for r in records if r.get("record") == "feature_check"]
     coverage = [r for r in records if r.get("record") == "coverage"]
     expected = Counter((f, s, level) for f in fixtures for s in seeds for level in levels)
+    case_groups = {}
+    for rec in cases:
+        case_groups.setdefault(case_key(rec), []).append(rec)
+    # Only unique, requested cases contribute evidence to report cells and totals.
+    unique_cases = [matches[0] for key, matches in case_groups.items()
+                    if key in expected and len(matches) == 1]
+    level_cases, matrix_complete, summaries, coverage_good = {}, {}, {}, {}
+    for level in levels:
+        selected = level_cases[level] = [r for r in unique_cases if r["optimization_level"] == level]
+        matrix_complete[level] = Counter(
+            case_key(r) for r in cases
+            if type(r.get("optimization_level")) is int and r["optimization_level"] == level
+        ) == Counter((f, s, level) for f in fixtures for s in seeds)
+        summary = summaries[level] = dict(
+            cases_with_moves=sum(type(r.get("absorption_moves")) is int
+                                 and r["absorption_moves"] > 0 for r in selected),
+            cases_absorption_changed=sum(r.get("absorption_changed") is True for r in selected))
+        for metric in ("absorption_runs", "absorption_moves"):
+            values = [r.get(metric) for r in selected]
+            summary[metric] = (sum(values) if all(type(v) is int and v >= 0 for v in values)
+                               else None)
+        matches = [r for r in coverage if type(r.get("optimization_level")) is int
+                   and r["optimization_level"] == level]
+        coverage_good[level] = (
+            matrix_complete[level] and all(case_passed(r) for r in selected)
+            and len(matches) == 1 and passed(matches[0])
+            and all(type(matches[0].get(key)) is int and matches[0][key] == value
+                    for key, value in summary.items())
+        )
+
+    def self_check_passed(rec):
+        key = case_key(rec)
+        matches = case_groups.get(key, []) if key in expected else []
+        return (passed(rec) and len(matches) == 1 and case_passed(matches[0])
+                and matches[0]["final_permutation"] != list(range(10)))
+
+    check_good = {}
+    for level in levels:
+        for name in CHECKS:
+            matches = [r for r in checks if r.get("name") == name
+                       and type(r.get("optimization_level")) is int and r["optimization_level"] == level]
+            check_good[name, level] = len(matches) == 1 and self_check_passed(matches[0])
     complete = (
         provenance and all(env.get(key) == value for key, value in settings.items())
         and len(records) == 1 + len(cases) + len(checks) + len(features) + len(coverage)
-        and Counter((r.get("fixture"), r.get("seed"), r.get("optimization_level"))
-                    for r in cases) == expected
+        and Counter(map(case_key, cases)) == expected
+        and all(type(r.get("optimization_level")) is int for r in checks + coverage)
         and Counter((r.get("name"), r.get("optimization_level")) for r in checks)
         == Counter((name, level) for name in CHECKS for level in levels)
         and Counter(r.get("name") for r in features) == Counter(FEATURE_CHECKS)
         and Counter(r.get("optimization_level") for r in coverage) == Counter(levels)
     )
     complete &= all(case_passed(rec) for rec in cases)
-    for rec in coverage:
-        selected = [r for r in cases if r.get("optimization_level") == rec.get("optimization_level")]
-        moves = sum(r.get("absorption_moves", 0) for r in selected)
-        complete &= (
-            rec.get("absorption_moves") == moves and moves > 0
-            and rec.get("absorption_runs") == sum(r.get("absorption_runs", 0) for r in selected)
-            and rec.get("cases_with_moves") == sum(r.get("absorption_moves", 0) > 0 for r in selected)
-            and rec.get("cases_with_moves") == len(selected)
-            and rec.get("cases_absorption_changed")
-            == sum(r.get("absorption_changed") is True for r in selected)
-            and rec.get("cases_absorption_changed") == len(selected)
-        )
+    complete &= all(coverage_good.values()) and all(check_good.values())
     failed = [r for r in cases + checks + features + coverage if not passed(r)]
     ok = complete and not failed
     lines = [
         "# SWAP absorption correctness", "",
-        f"**{'PASS' if ok else 'FAIL'}** — {sum(map(case_passed, cases))}/{sum(expected.values())} cases; "
-        f"{sum(map(passed, checks))}/{len(CHECKS) * len(levels)} negative self-checks; "
+        f"**{'PASS' if ok else 'FAIL'}** — {sum(map(case_passed, unique_cases))}/{sum(expected.values())} cases; "
+        f"{sum(check_good.values())}/{len(CHECKS) * len(levels)} negative self-checks; "
         f"{sum(map(passed, features))}/{len(FEATURE_CHECKS)} focused checks.", "",
         f"Revision: `{env.get('sha', '?')}`. Seeds: `{seeds}`. Optimization levels: `{levels}`.",
         f"Run: {env.get('timestamp', '?')}. Qiskit {env.get('qiskit_version', '?')}; "
@@ -133,8 +177,7 @@ def build_report(records, results_path):
     for fixture in fixtures:
         cells = []
         for level in levels:
-            selected = [r for r in cases if r.get("fixture") == fixture
-                        and r.get("optimization_level") == level]
+            selected = [r for r in level_cases[level] if r["fixture"] == fixture]
             passing = sum(map(case_passed, selected))
             changed = sum(r.get("absorption_changed") is True for r in selected)
             cells.append(f"{passing}/{len(seeds)} pass; {changed}/{len(seeds)} changed")
@@ -144,21 +187,21 @@ def build_report(records, results_path):
               "| Moves | Pass executions | Coverage |",
               "|---|---|---|---|---|---|"]
     for level in levels:
-        matches = [r for r in coverage if r.get("optimization_level") == level]
-        rec = matches[0] if len(matches) == 1 else {}
+        summary = summaries[level]
         total = len(fixtures) * len(seeds)
-        lines.append(f"| {level} | {rec.get('cases_absorption_changed', '?')}/{total} | "
-                     f"{rec.get('cases_with_moves', '?')} | "
-                     f"{rec.get('absorption_moves', '?')} | {rec.get('absorption_runs', '?')} | "
-                     f"{'PASS' if passed(rec) else 'FAIL'} |")
+        moves, runs = (summary[key] if summary[key] is not None else "incomplete"
+                       for key in ("absorption_moves", "absorption_runs"))
+        lines.append(f"| {level} | {summary['cases_absorption_changed']}/{total} | "
+                     f"{summary['cases_with_moves']} | {moves} | {runs} | "
+                     f"{'PASS' if coverage_good[level] else 'FAIL'} |")
     lines += ["", "Totals across all cases (absorption disabled → enabled):", "",
               "| Level | Two-qubit gates | Circuit depths (sum) |", "|---|---|---|"]
     for level in levels:
-        selected = [r for r in cases if r.get("optimization_level") == level]
+        selected = level_cases[level]
         totals = []
         for metric in ("two_qubit_gates", "depth"):
             values = [r.get(key) for r in selected for key in ("disabled_" + metric, metric)]
-            if all(type(value) is int and value >= 0 for value in values):
+            if matrix_complete[level] and all(type(value) is int and value >= 0 for value in values):
                 totals.append(f"{sum(values[::2])} → {sum(values[1::2])}")
             else:
                 totals.append("incomplete")
@@ -169,10 +212,11 @@ def build_report(records, results_path):
     for level in levels:
         for name in CHECKS:
             matches = [r for r in checks if r.get("name") == name
-                       and r.get("optimization_level") == level]
+                       and type(r.get("optimization_level")) is int and r["optimization_level"] == level]
             rec = matches[0] if len(matches) == 1 else {}
             source = f"`{rec.get('fixture', '?')}`, seed {rec.get('seed', '?')}"
-            lines.append(f"- Level {level}, `{name}`: {'PASS' if passed(rec) else 'FAIL'} ({source}).")
+            lines.append(f"- Level {level}, `{name}`: "
+                         f"{'PASS' if check_good[name, level] else 'FAIL'} ({source}).")
     lines += ["", "Focused checks:", ""]
     for name in FEATURE_CHECKS:
         matches = [r for r in features if r.get("name") == name]
@@ -180,7 +224,7 @@ def build_report(records, results_path):
         lines.append(f"- `{name}`: {'PASS' if good else 'FAIL'}.")
     if not complete:
         lines += ["", "FAIL: missing, duplicate, or unexpected results/settings, missing Qiskit "
-                  "provenance, or incomplete per-case change/move evidence."]
+                  "provenance, or incomplete per-case change/move or negative-check evidence."]
     for rec in cases:
         if passed(rec) and not case_passed(rec):
             lines += ["", f"FAIL: {rec.get('fixture')} seed {rec.get('seed')} "

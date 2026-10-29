@@ -9,8 +9,9 @@ baseline unitary check. This removes **60 circuit/seed/level combinations**:
 they are not additional failures.
 
 The active suite now has 132 mandatory cases. Its [report](../report.md) is dedicated
-to validating the SWAP-absorption change. A baseline mismatch in any active case
-fails the run; there is no automatic exclusion policy.
+to validating the SWAP-absorption change using one checkout with absorption enabled
+and disabled. A correctness failure in either output fails the case and the run;
+there is no automatic exclusion policy.
 
 The original run started at `2026-10-28T18:13:44+00:00` (20:13:44 in Jerusalem).
 Its complete evidence is preserved in

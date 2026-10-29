@@ -358,6 +358,12 @@ def main():
         parser.error("Seeds must be distinct unsigned 64-bit integers")
     if len(set(args.optimization_levels)) != len(args.optimization_levels):
         parser.error("Optimization levels must be distinct")
+    # Invalidate any previous successful run before loading Qiskit. Initialization
+    # errors or interruption must not leave old evidence looking like this run.
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(dict(
+        record="run_status", passed=False,
+        error="Validation did not complete; rerun run_validation.py")) + "\n", encoding="utf-8")
     source = args.qiskit_src.resolve()
     provenance = load_source(source)
     from qiskit.quantum_info import Operator

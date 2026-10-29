@@ -32,7 +32,7 @@ def complete_records(seeds=(0,)):
                                     disabled_depth=12, disabled_two_qubit_gates=7,
                                     disabled_final_permutation=[1, 0, *range(2, 10)]))
         records.extend(dict(record="self_check", name=name, optimization_level=level,
-                            fixture="fixture0", seed=0, passed=True) for name in CHECKS)
+                            fixture="fixture0", seed=seeds[0], passed=True) for name in CHECKS)
         total = len(env["fixtures"]) * len(seeds)
         records.append(dict(record="coverage", optimization_level=level, passed=True,
                             absorption_runs=total, absorption_moves=total, cases_with_moves=total,
@@ -115,7 +115,7 @@ class ReportTests(unittest.TestCase):
             build_report(records, "sample.jsonl")
 
     def test_requested_single_level_passes(self):
-        records = complete_records()
+        records = complete_records((7,))
         records[0]["optimization_levels"] = [3]
         records = [r for r in records if r.get("optimization_level") != 2]
         self.assertTrue(build_report(records, "sample.jsonl")[0])
@@ -135,6 +135,75 @@ class ReportTests(unittest.TestCase):
     def test_missing_entire_level_fails(self):
         records = [r for r in complete_records() if r.get("optimization_level") != 3]
         self.assertFalse(build_report(records, "sample.jsonl")[0])
+
+    def test_incomplete_case_matrix_cannot_display_passing_coverage_or_complete_totals(self):
+        for duplicate in (False, True):
+            with self.subTest(duplicate=duplicate):
+                records = complete_records()
+                if duplicate:
+                    records.append(copy.deepcopy(records[1]))
+                else:
+                    records.pop(1)
+                ok, report = build_report(records, "sample.jsonl")
+                self.assertFalse(ok)
+                self.assertIn("| 2 | 10/11 | 10 | 10 | 10 | FAIL |", report)
+                self.assertIn("| 2 | incomplete | incomplete |", report)
+                self.assertIn("| 3 | 77 → 55 | 132 → 110 |", report)
+
+    def test_coverage_display_uses_actual_evidence_and_validated_status(self):
+        records = complete_records()
+        next(r for r in records if r["record"] == "coverage")["cases_absorption_changed"] = 999
+        ok, report = build_report(records, "sample.jsonl")
+        self.assertFalse(ok)
+        self.assertIn("| 2 | 11/11 | 11 | 11 | 11 | FAIL |", report)
+        self.assertNotIn("999/11", report)
+        records = complete_records()
+        records[1]["disabled_passed"] = False
+        ok, report = build_report(records, "sample.jsonl")
+        self.assertFalse(ok)
+        self.assertIn("| 2 | 11/11 | 11 | 11 | 11 | FAIL |", report)
+
+    def test_negative_checks_require_a_known_requested_source(self):
+        for key, value in (("fixture", None), ("fixture", "unknown"), ("seed", None),
+                           ("seed", 999), ("seed", False)):
+            with self.subTest(key=key, value=value):
+                records = complete_records()
+                check = next(r for r in records if r["record"] == "self_check")
+                if value is None:
+                    del check[key]
+                else:
+                    check[key] = value
+                ok, report = build_report(records, "sample.jsonl")
+                self.assertFalse(ok)
+                self.assertIn("3/4 negative self-checks", report)
+                self.assertIn(f"- Level 2, `{CHECKS[0]}`: FAIL", report)
+
+    def test_negative_checks_require_a_unique_passing_case_with_changed_layout(self):
+        for condition in ("duplicate", "failed", "identity_layout", "wrong_level"):
+            with self.subTest(condition=condition):
+                records = complete_records()
+                if condition == "duplicate":
+                    records.append(copy.deepcopy(records[1]))
+                elif condition == "failed":
+                    records[1]["enabled_passed"] = False
+                elif condition == "identity_layout":
+                    records[1]["final_permutation"] = list(range(10))
+                else:
+                    records[1]["optimization_level"] = 3
+                ok, report = build_report(records, "sample.jsonl")
+                self.assertFalse(ok)
+                self.assertIn(f"- Level 2, `{CHECKS[0]}`: FAIL", report)
+                self.assertIn(f"- Level 2, `{CHECKS[1]}`: FAIL", report)
+
+    def test_numeric_aliases_cannot_satisfy_record_identifiers(self):
+        for kind, key, value in (("case", "seed", False), ("case", "seed", 0.0),
+                                 ("case", "optimization_level", 2.0),
+                                 ("self_check", "optimization_level", 2.0),
+                                 ("coverage", "optimization_level", 2.0)):
+            with self.subTest(kind=kind, key=key, value=value):
+                records = complete_records()
+                next(r for r in records if r["record"] == kind)[key] = value
+                self.assertFalse(build_report(records, "sample.jsonl")[0])
 
     def test_false_coverage_fails(self):
         records = complete_records()
@@ -224,6 +293,21 @@ class ReportTests(unittest.TestCase):
                 self.assertEqual(main(), 1)
             self.assertIn("**FAIL**", output.read_text())
             self.assertIn("schema version 4", output.read_text())
+
+    def test_incomplete_run_marker_reports_failure_even_alongside_old_success(self):
+        message = "Validation did not complete; rerun run_validation.py"
+        marker = dict(record="run_status", passed=False, error=message)
+        for records in ([marker], [marker, *complete_records()]):
+            with self.subTest(records=len(records)):
+                with self.assertRaisesRegex(ValueError, message):
+                    build_report(records, "sample.jsonl")
+        with tempfile.TemporaryDirectory() as directory:
+            source, output = Path(directory) / "unfinished.jsonl", Path(directory) / "report.md"
+            source.write_text(json.dumps(marker) + "\n")
+            with patch("sys.argv", ["make_report.py", "--results", str(source), "--out", str(output)]):
+                self.assertEqual(main(), 1)
+            self.assertIn("**FAIL**", output.read_text())
+            self.assertIn(message, output.read_text())
 
     def test_previous_schemas_require_a_fresh_run(self):
         for version in (2, 3):

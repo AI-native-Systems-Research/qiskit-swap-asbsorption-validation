@@ -39,11 +39,11 @@ source tree, and have an up-to-date build. The Python environment must have the
 required dependencies, including `ddt`. For a fresh checkout, also run
 `python setup.py egg_info` in it using that environment.
 
-Run from this folder:
+Run validation from this folder and generate the report on success:
 
 ```bash
 ../qiskit-evolved/.venv/bin/python run_validation.py \
-  --qiskit-src ../qiskit-swap-absorption
+  --qiskit-src ../qiskit-swap-absorption && \
 ../qiskit-evolved/.venv/bin/python make_report.py
 ```
 
@@ -51,6 +51,9 @@ Read [report.md](report.md) for the circuit list and results. Raw results are sa
 in [results/results.jsonl](results/results.jsonl). Both scripts return a nonzero
 exit code on failure. Results now use schema version 4; rerun validation to replace
 results from the earlier workflow before generating a report.
+Starting validation marks its results file as incomplete until the run finishes.
+A setup failure or interrupted run leaves incomplete results, which the reporter
+rejects.
 
 For a smaller run, add `--seeds 0`. To test one level, add `--optimization-levels 2`
 or `--optimization-levels 3` to the validation command.
