@@ -8,7 +8,7 @@ baseline unitary check. This removes **60 circuit/seed/level combinations**:
 26 passing cases were removed to keep complete fixture families in the suite;
 they are not additional failures.
 
-The active suite now has 132 mandatory cases. Its [report](report.md) is dedicated
+The active suite now has 132 mandatory cases. Its [report](../report.md) is dedicated
 to validating the SWAP-absorption change. A baseline mismatch in any active case
 fails the run; there is no automatic exclusion policy.
 
@@ -79,8 +79,8 @@ To repeat the baseline audit using the archived case selection and original
 prepared inputs:
 
 ```bash
-../qiskit-evolved/.venv/bin/python diagnose_baseline.py \
-  --qiskit-src ../qiskit-swap-absorption-before \
+../../qiskit-evolved/.venv/bin/python diagnose_baseline.py \
+  --qiskit-src ../../qiskit-swap-absorption-before \
   --results results/results_before_fixture_selection.jsonl \
   --inputs-dir results/baseline_inputs \
   --out results/baseline_diagnostics.json

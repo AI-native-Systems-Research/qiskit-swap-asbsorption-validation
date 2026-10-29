@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from excluded_fixtures import fixtures
 from run_validation import load_source, prepare_inputs, preset_manager, require
 
@@ -64,7 +66,7 @@ def measure(reference, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--qiskit-src", type=Path,
-                        default=Path(__file__).resolve().parent.parent / "qiskit-swap-absorption-before")
+                        default=Path(__file__).resolve().parents[2] / "qiskit-swap-absorption-before")
     parser.add_argument("--results", type=Path,
                         default=Path("results/results_before_fixture_selection.jsonl"))
     parser.add_argument("--inputs-dir", type=Path,

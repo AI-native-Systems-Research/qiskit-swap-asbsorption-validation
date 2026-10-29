@@ -99,12 +99,12 @@ The reproducer tests both direct `TwoQubitBasisDecomposer(CXGate(), euler_basis=
 
 All three baseline probes fail strict equality and pass phase-insensitive equivalence. All three newer-checkout probes pass strict equality. Results and build identities are saved in [baseline_reproducer_results.json](results/baseline_reproducer_results.json).
 
-Run this from the validation repository to reproduce both checkouts in separate interpreters:
+Run this from the `bug` folder to reproduce both checkouts in separate interpreters:
 
 ```bash
-../qiskit-evolved/.venv/bin/python reproduce_baseline_phase_bug.py \
-  --baseline-src ../qiskit-swap-absorption-before \
-  --candidate-src ../qiskit-swap-absorption \
+../../qiskit-evolved/.venv/bin/python reproduce_baseline_phase_bug.py \
+  --baseline-src ../../qiskit-swap-absorption-before \
+  --candidate-src ../../qiskit-swap-absorption \
   --out results/baseline_reproducer_results.json
 ```
 
@@ -143,8 +143,8 @@ See [disabled controls](results/baseline_candidate_disabled_controls.json) and [
 **Reproducing the full exclusion audit.** The original prepared inputs are preserved under [results/baseline_inputs/](results/baseline_inputs/). Their hashes are checked against the original validation records before any circuit runs. Use:
 
 ```bash
-../qiskit-evolved/.venv/bin/python diagnose_baseline.py \
-  --qiskit-src ../qiskit-swap-absorption-before \
+../../qiskit-evolved/.venv/bin/python diagnose_baseline.py \
+  --qiskit-src ../../qiskit-swap-absorption-before \
   --results results/results_before_fixture_selection.jsonl \
   --inputs-dir results/baseline_inputs \
   --out results/baseline_diagnostics.json
@@ -153,8 +153,8 @@ See [disabled controls](results/baseline_candidate_disabled_controls.json) and [
 To reproduce the five newer-checkout controls with absorption disabled:
 
 ```bash
-../qiskit-evolved/.venv/bin/python diagnose_baseline.py \
-  --qiskit-src ../qiskit-swap-absorption \
+../../qiskit-evolved/.venv/bin/python diagnose_baseline.py \
+  --qiskit-src ../../qiskit-swap-absorption \
   --results results/results_before_fixture_selection.jsonl \
   --inputs-dir results/baseline_inputs \
   --representatives --disable-absorption \

@@ -13,6 +13,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from run_validation import load_source
 
 
@@ -104,7 +106,7 @@ def probe(source):
 
 
 def main():
-    root = Path(__file__).resolve().parent
+    root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--qiskit-src", type=Path,
                         help="Probe one checkout; otherwise compare baseline and candidate separately")
