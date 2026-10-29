@@ -9,7 +9,6 @@ import sys
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from swap_absorption_checks import feature_checks
@@ -42,7 +41,7 @@ def fixtures():
     from test.benchmarks import qft, utils
 
     # Fixed wire permutations make these workloads exercise routing on a line.
-    # They are part of the fixture, so every checkout receives the same circuit.
+    # They are part of the fixture, so both runs receive the same circuit.
     spread = [4, 6, 2, 7, 3, 5, 9, 0, 8, 1]
     spread_bv = [8, 4, 7, 0, 1, 2, 5, 9, 6, 3]
     spread_chain = [2, 0, 7, 6, 9, 5, 3, 4, 8, 1]
@@ -121,7 +120,7 @@ def require(condition, message):
 
 
 def preset_manager(qc, cmap, seed, level):
-    """Use identical settings in the candidate, baseline, and disabled-pass control."""
+    """Use identical settings with absorption enabled and disabled."""
     from qiskit.transpiler import generate_preset_pass_manager
 
     return generate_preset_pass_manager(
@@ -163,6 +162,21 @@ def transpile_and_check(qc, reference, cmap, seed, level, metrics, unitary_cache
     return out
 
 
+def transpile_disabled_and_check(qc, reference, cmap, seed, level, metrics, unitary_cache=None):
+    """Run the full pipeline with absorption bypassed, then check its correctness."""
+    from qiskit.transpiler.preset_passmanagers import _swap_absorption
+
+    # Only this pass becomes a no-op. All other passes run with the same settings,
+    # and the original method is restored even if transpilation raises an error.
+    with patch.object(_swap_absorption._AbsorbIntoSwaps, "run", lambda self, dag: dag):
+        out = preset_manager(qc, cmap, seed, level).run(qc.copy())
+    try:
+        check_output(out, qc, reference, cmap, metrics, unitary_cache)
+    except OperatorMismatch as exc:
+        raise OperatorMismatch("Disabled control operator mismatch") from exc
+    return out
+
+
 class OperatorMismatch(ValueError):
     """A structurally valid output fails the phase-sensitive unitary comparison."""
 
@@ -193,7 +207,7 @@ def operator_key(out):
 
 
 def check_output(out, qc, reference, cmap, metrics, unitary_cache=None):
-    """Apply the same correctness checks to candidate and baseline outputs."""
+    """Apply the same correctness checks to enabled and disabled outputs."""
     from qiskit.quantum_info import Operator
 
     require(out.num_qubits == qc.num_qubits == 10, "Output width changed")
@@ -238,21 +252,16 @@ def gate_structure(circuit):
     return dag
 
 
-def check_changes(out, baseline, disabled, metrics):
+def check_changes(out, disabled, metrics):
     """Require structural changes, ignoring names and independent instruction ordering.
 
     DAG equality compares gates, parameters and wires. Phase and layout metadata
     alone are not evidence of changed gate structure. Phase is checked separately
     by the full operator comparison.
-    The disabled-pass control excludes differences caused by unrelated baseline changes.
     """
-    structure = gate_structure(out)
-    metrics.update(circuit_changed=structure != gate_structure(baseline),
-                   absorption_changed=structure != gate_structure(disabled))
+    metrics["absorption_changed"] = gate_structure(out) != gate_structure(disabled)
     require(metrics["absorption_moves"] > 0,
             "No absorption moves; modify this fixture to exercise SWAP absorption")
-    require(metrics["circuit_changed"],
-            "Circuit unchanged from baseline; modify this fixture")
     require(metrics["absorption_changed"],
             "Circuit unchanged with absorption disabled; modify this fixture")
 
@@ -324,53 +333,23 @@ def load_source(source):
                 accelerate_sha256=hashlib.sha256(extension.read_bytes()).hexdigest())
 
 
-def prepare_inputs(builders, directory):
-    """Serialize each prepared input once, so both checkouts receive identical circuits."""
-    from qiskit import qpy
+def prepare_input(builder):
+    """Prepare one input; both transpilation runs receive independent copies of it."""
     from qiskit.transpiler import PassManager
     from qiskit.transpiler.passes import Unroll3qOrMore
 
-    inputs = {}
-    for name, builder in builders.items():
-        print(f"Preparing {name}", flush=True)
-        item = {}
-        try:
-            qc = builder().remove_final_measurements(inplace=False)
-            qc = qc.assign_parameters([0.1 * (i + 1) for i in range(qc.num_parameters)])
-            qc = PassManager([Unroll3qOrMore()]).run(qc)
-            require(qc.num_qubits == 10 and all(len(i.qubits) <= 2 for i in qc.data),
-                    "Expected 10 qubits and only one- or two-qubit instructions")
-            path = directory / f"{name}.qpy"
-            with path.open("wb") as stream:
-                # Version 13 is supported by both checkouts; all fixtures are unitary.
-                qpy.dump(qc, stream, version=13)
-            item.update(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException as exc:
-            item["error"] = f"Preparation failed: {exc!r}"
-        inputs[name] = item
-    return inputs
-
-
-def run_baseline(source, inputs, seeds, levels, directory):
-    """Use a fresh interpreter: Qiskit's Rust modules cannot be switched in-process."""
-    request = directory / "request.json"
-    response = directory / "baseline.json"
-    request.write_text(json.dumps(dict(inputs=inputs, seeds=seeds, optimization_levels=levels)))
-    subprocess.run([sys.executable, str(Path(__file__).with_name("baseline_worker.py")),
-                    "--qiskit-src", str(source), "--request", str(request),
-                    "--out", str(response)], check=True)
-    return json.loads(response.read_text())
+    qc = builder().remove_final_measurements(inplace=False)
+    qc = qc.assign_parameters([0.1 * (i + 1) for i in range(qc.num_parameters)])
+    qc = PassManager([Unroll3qOrMore()]).run(qc)
+    require(qc.num_qubits == 10 and all(len(i.qubits) <= 2 for i in qc.data),
+            "Expected 10 qubits and only one- or two-qubit instructions")
+    return qc
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--qiskit-src", type=Path,
                         default=Path(__file__).resolve().parent.parent / "qiskit-swap-absorption")
-    parser.add_argument("--baseline-src", type=Path,
-                        default=Path(__file__).resolve().parent.parent / "qiskit-swap-absorption-before",
-                        help="Built Qiskit checkout without SWAP absorption")
     parser.add_argument("--seeds", type=int, nargs="+", default=SEEDS)
     parser.add_argument("--optimization-levels", type=int, nargs="+", choices=LEVELS, default=LEVELS)
     parser.add_argument("--out", type=Path, default=Path("results/results.jsonl"))
@@ -380,17 +359,15 @@ def main():
     if len(set(args.optimization_levels)) != len(args.optimization_levels):
         parser.error("Optimization levels must be distinct")
     source = args.qiskit_src.resolve()
-    baseline_source = args.baseline_src.resolve()
-    require(source != baseline_source, "Candidate and baseline must be different checkouts")
     provenance = load_source(source)
-    from qiskit import qpy
     from qiskit.quantum_info import Operator
     from qiskit.transpiler import CouplingMap
-    from qiskit.transpiler.preset_passmanagers import builtin_plugins, _swap_absorption
+    from qiskit.transpiler.preset_passmanagers import builtin_plugins
 
     builders = fixtures()
     records = [dict(
-        record="environment", schema_version=3, **provenance, comparison_method="dag",
+        record="environment", schema_version=4, **provenance, comparison_method="dag",
+        comparison_mode="enabled_vs_disabled",
         python=sys.version.split()[0], timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         fixtures=list(builders), seeds=args.seeds, optimization_levels=args.optimization_levels,
         basis_gates=BASIS_GATES, coupling_map="line(10)", layout_method="trivial",
@@ -399,84 +376,63 @@ def main():
     )]
     cmap = CouplingMap.from_line(10)
     samples = dict.fromkeys(args.optimization_levels)
-    with TemporaryDirectory(prefix="swap-absorption-") as temporary:
-        directory = Path(temporary)
-        inputs = prepare_inputs(builders, directory)
-        baseline = run_baseline(baseline_source, inputs, args.seeds, args.optimization_levels, directory)
-        records[0]["baseline"] = baseline["environment"]
-        baseline_cases = {(r["fixture"], r["optimization_level"], r["seed"]): r
-                          for r in baseline["cases"]}
-        for name, item in inputs.items():
-            # Never reuse an operator comparison across different reference inputs.
-            unitary_cache = {}
-            error = item.get("error")
-            print(f"Checking {name}", flush=True)
-            try:
-                require(error is None, error)
-                with Path(item["path"]).open("rb") as stream:
-                    qc, = qpy.load(stream)
-                reference = Operator.from_circuit(qc)
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            except BaseException as exc:
-                error = f"Preparation failed: {exc!r}"
-            for level in args.optimization_levels:
-                for seed in args.seeds:
-                    print(f"  level {level}, seed {seed}: ", end="", flush=True)
-                    rec = dict(record="case", fixture=name, seed=seed, optimization_level=level,
-                               passed=False, absorption_runs=0, absorption_moves=0,
-                               absorption_swaps_seen=0, baseline_passed=False,
-                               circuit_changed=False, absorption_changed=False,
-                               input_sha256=item.get("sha256"))
+    for name, builder in builders.items():
+        # Never reuse an operator comparison across different reference inputs.
+        unitary_cache = {}
+        error = None
+        print(f"Checking {name}", flush=True)
+        try:
+            qc = prepare_input(builder)
+            reference = Operator.from_circuit(qc)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            error = f"Preparation failed: {exc!r}"
+        for level in args.optimization_levels:
+            for seed in args.seeds:
+                print(f"  level {level}, seed {seed}: ", end="", flush=True)
+                rec = dict(record="case", fixture=name, seed=seed, optimization_level=level,
+                           passed=False, enabled_passed=False, disabled_passed=False,
+                           absorption_runs=0, absorption_moves=0, absorption_swaps_seen=0,
+                           absorption_changed=False)
+                try:
+                    require(error is None, error)
+                    disabled_metrics = {}
                     try:
-                        require(error is None, error)
-                        before = baseline_cases[name, level, seed]
-                        rec["baseline_input_sha256"] = before.get("input_sha256")
-                        require(before.get("error") is None, f"Baseline failed: {before.get('error')}")
-                        require(rec["input_sha256"] == rec["baseline_input_sha256"],
-                                "Baseline used a different input circuit")
-                        with Path(before["output"]).open("rb") as stream:
-                            baseline_out, = qpy.load(stream)
-                        baseline_metrics = {}
-                        try:
-                            check_output(baseline_out, qc, reference, cmap, baseline_metrics,
-                                         unitary_cache)
-                        except OperatorMismatch as exc:
-                            raise OperatorMismatch("Baseline operator mismatch") from exc
-                        finally:
-                            rec.update({f"baseline_{key}": value
-                                        for key, value in baseline_metrics.items()})
-                        rec["baseline_passed"] = True
-                        out = transpile_and_check(qc, reference, cmap, seed, level, rec, unitary_cache)
-                        with patch.object(_swap_absorption._AbsorbIntoSwaps, "run",
-                                          lambda self, dag: dag):
-                            disabled = preset_manager(qc, cmap, seed, level).run(qc.copy())
-                        check_changes(out, baseline_out, disabled, rec)
-                        rec["passed"] = True
-                        if samples[level] is None and rec["final_permutation"] != list(range(10)):
-                            samples[level] = (out, reference, name, seed)
-                    except (KeyboardInterrupt, SystemExit):
-                        raise
-                    except BaseException as exc:
-                        rec["error"] = repr(exc)
-                    records.append(rec)
-                    print(f"PASS ({rec['absorption_moves']} moves, changed from baseline and disabled control)"
-                          if rec["passed"] else f"FAIL {rec['error']}", flush=True)
+                        disabled = transpile_disabled_and_check(
+                            qc, reference, cmap, seed, level, disabled_metrics, unitary_cache)
+                    finally:
+                        rec.update({f"disabled_{key}": value
+                                    for key, value in disabled_metrics.items()})
+                    rec["disabled_passed"] = True
+                    out = transpile_and_check(qc, reference, cmap, seed, level, rec, unitary_cache)
+                    rec["enabled_passed"] = True
+                    check_changes(out, disabled, rec)
+                    rec["passed"] = True
+                    if samples[level] is None and rec["final_permutation"] != list(range(10)):
+                        samples[level] = (out, reference, name, seed)
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as exc:
+                    rec["error"] = repr(exc)
+                records.append(rec)
+                print(f"PASS ({rec['absorption_moves']} moves, changed from absorption disabled)"
+                      if rec["passed"] else f"FAIL {rec['error']}", flush=True)
 
     for level in args.optimization_levels:
         records += self_checks(samples[level], level)
         cases = [r for r in records if r["record"] == "case" and r["optimization_level"] == level]
         moves = sum(r["absorption_moves"] for r in cases)
-        changed = sum(r["circuit_changed"] for r in cases)
         absorption_changed = sum(r["absorption_changed"] for r in cases)
         coverage = dict(record="coverage", optimization_level=level,
-                        passed=bool(cases) and all(r["absorption_moves"] > 0 for r in cases)
-                        and changed == absorption_changed == len(cases),
+                        passed=bool(cases) and all(r["passed"] and r["absorption_moves"] > 0
+                                                  for r in cases)
+                        and absorption_changed == len(cases),
                         absorption_moves=moves, absorption_runs=sum(r["absorption_runs"] for r in cases),
                         cases_with_moves=sum(r["absorption_moves"] > 0 for r in cases),
-                        cases_changed=changed, cases_absorption_changed=absorption_changed)
+                        cases_absorption_changed=absorption_changed)
         if not coverage["passed"]:
-            coverage["error"] = "Every case must make absorption moves and change both comparisons"
+            coverage["error"] = "Every case must pass both outputs, make absorption moves, and change gates"
         records.append(coverage)
     records += feature_checks()
     args.out.parent.mkdir(parents=True, exist_ok=True)

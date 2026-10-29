@@ -18,7 +18,36 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from excluded_fixtures import fixtures
-from run_validation import load_source, prepare_inputs, preset_manager, require
+from run_validation import load_source, preset_manager, require
+
+
+def prepare_inputs(builders, directory):
+    """Preserve the historical input preparation and QPY hashes for this audit."""
+    from qiskit import qpy
+    from qiskit.transpiler import PassManager
+    from qiskit.transpiler.passes import Unroll3qOrMore
+
+    inputs = {}
+    for name, builder in builders.items():
+        print(f"Preparing {name}", flush=True)
+        item = {}
+        try:
+            qc = builder().remove_final_measurements(inplace=False)
+            qc = qc.assign_parameters([0.1 * (i + 1) for i in range(qc.num_parameters)])
+            qc = PassManager([Unroll3qOrMore()]).run(qc)
+            require(qc.num_qubits == 10 and all(len(i.qubits) <= 2 for i in qc.data),
+                    "Expected 10 qubits and only one- or two-qubit instructions")
+            path = directory / f"{name}.qpy"
+            with path.open("wb") as stream:
+                # Version 13 is supported by both historical checkouts.
+                qpy.dump(qc, stream, version=13)
+            item.update(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            item["error"] = f"Preparation failed: {exc!r}"
+        inputs[name] = item
+    return inputs
 
 
 def operator_description(circuit):

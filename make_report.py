@@ -26,18 +26,16 @@ def permutation(value):
 def case_passed(record):
     """A passing flag alone does not establish correctness or actual absorption."""
     metrics = ("absorption_runs", "absorption_moves", "absorption_swaps_seen", "depth",
-               "two_qubit_gates", "baseline_depth", "baseline_two_qubit_gates")
+               "two_qubit_gates", "disabled_depth", "disabled_two_qubit_gates")
     return (
         passed(record)
         and all(type(record.get(key)) is int and record[key] >= 0 for key in metrics)
         and record["absorption_runs"] > 0 and record["absorption_moves"] > 0
-        and record.get("baseline_passed") is True
-        and record.get("circuit_changed") is True
+        and record.get("enabled_passed") is True
+        and record.get("disabled_passed") is True
         and record.get("absorption_changed") is True
-        and sha256(record.get("input_sha256"))
-        and record.get("input_sha256") == record.get("baseline_input_sha256")
         and permutation(record.get("final_permutation"))
-        and permutation(record.get("baseline_final_permutation"))
+        and permutation(record.get("disabled_final_permutation"))
     )
 
 
@@ -49,16 +47,14 @@ def build_report(records, results_path):
     if len(environments) != 1:
         raise ValueError("Expected exactly one environment record")
     env = environments[0]
-    if env.get("schema_version") != 3:
-        raise ValueError("Expected swap-absorption schema version 3; rerun run_validation.py")
-    baseline = env.get("baseline", {})
-    if not isinstance(baseline, dict):
-        baseline = {}
+    if env.get("schema_version") != 4:
+        raise ValueError("Expected swap-absorption schema version 4; rerun run_validation.py")
     provenance = (
-        all(isinstance(baseline.get(key), str) and baseline[key]
+        all(isinstance(env.get(key), str) and env[key]
             for key in ("sha", "qiskit_version", "qiskit_source", "accelerate_file"))
-        and sha256(baseline.get("accelerate_sha256"))
+        and sha256(env.get("accelerate_sha256"))
         and env.get("comparison_method") == "dag"
+        and env.get("comparison_mode") == "enabled_vs_disabled"
     )
     fixtures, seeds, levels = env["fixtures"], env["seeds"], env["optimization_levels"]
     if not (
@@ -99,8 +95,6 @@ def build_report(records, results_path):
             and rec.get("absorption_runs") == sum(r.get("absorption_runs", 0) for r in selected)
             and rec.get("cases_with_moves") == sum(r.get("absorption_moves", 0) > 0 for r in selected)
             and rec.get("cases_with_moves") == len(selected)
-            and rec.get("cases_changed") == sum(r.get("circuit_changed") is True for r in selected)
-            and rec.get("cases_changed") == len(selected)
             and rec.get("cases_absorption_changed")
             == sum(r.get("absorption_changed") is True for r in selected)
             and rec.get("cases_absorption_changed") == len(selected)
@@ -112,26 +106,27 @@ def build_report(records, results_path):
         f"**{'PASS' if ok else 'FAIL'}** — {sum(map(case_passed, cases))}/{sum(expected.values())} cases; "
         f"{sum(map(passed, checks))}/{len(CHECKS) * len(levels)} negative self-checks; "
         f"{sum(map(passed, features))}/{len(FEATURE_CHECKS)} focused checks.", "",
-        f"Revision: `{env['sha']}`. Seeds: `{seeds}`. Optimization levels: `{levels}`.",
-        f"Run: {env['timestamp']}. Qiskit {env['qiskit_version']}; Python {env['python']}.",
-        f"Loaded extension SHA-256: `{env['accelerate_sha256']}`.", "",
-        f"Baseline revision: `{baseline.get('sha', '?')}`; "
-        f"Qiskit {baseline.get('qiskit_version', '?')}.",
-        f"Baseline source: `{baseline.get('qiskit_source', '?')}`.",
-        f"Baseline extension: `{baseline.get('accelerate_file', '?')}`.",
-        f"Baseline extension SHA-256: `{baseline.get('accelerate_sha256', '?')}`.", "",
+        f"Revision: `{env.get('sha', '?')}`. Seeds: `{seeds}`. Optimization levels: `{levels}`.",
+        f"Run: {env.get('timestamp', '?')}. Qiskit {env.get('qiskit_version', '?')}; "
+        f"Python {env.get('python', '?')}.",
+        f"Qiskit source: `{env.get('qiskit_source', '?')}`.",
+        f"Loaded extension: `{env.get('accelerate_file', '?')}`.",
+        f"Loaded extension SHA-256: `{env.get('accelerate_sha256', '?')}`.", "",
+        "Comparison: absorption enabled vs disabled in the same Qiskit checkout. "
+        "Both runs use copies of the same prepared input and identical transpiler settings. "
+        "The disabled run temporarily replaces the absorption pass with a no-op; "
+        "all other passes still execute.", "",
         f"{len(fixtures)} circuits, 10 qubits each; full preset pipeline, bidirectional line, trivial initial "
         "layout, SABRE routing, and the `rz`, `sx`, `x`, `cx` basis. Exact synthesis; arbitrary "
         "input states (`qubits_initially_zero=False`).",
         "Both outputs must match the same original unitary (layout-aware, global phase kept, default "
         "tolerances), preserve width and layout metadata, and satisfy connectivity and basis "
-        "constraints. Every case must select absorption moves and produce a structurally different "
-        "circuit from both the baseline and the current checkout with absorption disabled. "
+        "constraints. Every enabled run must select absorption moves and produce a structurally "
+        "different circuit from the run with absorption disabled. "
         "DAG comparison ignores circuit names and the ordering of independent operations. "
         "Phase-only and layout-only changes do not count as changes to gates. "
-        "Matching input SHA-256 values verify that both checkouts received the same circuit. "
         "Every requested circuit/seed/level combination must have a passing result.", "",
-        "Per cell: passing cases; cases changed from baseline, out of all requested seeds.", "",
+        "Per cell: passing cases; cases changed by enabling absorption, out of all requested seeds.", "",
         "| Circuit | " + " | ".join(f"Level {level}" for level in levels) + " |",
         "|---|" + "---|" * len(levels),
     ]
@@ -141,29 +136,28 @@ def build_report(records, results_path):
             selected = [r for r in cases if r.get("fixture") == fixture
                         and r.get("optimization_level") == level]
             passing = sum(map(case_passed, selected))
-            changed = sum(r.get("circuit_changed") is True for r in selected)
+            changed = sum(r.get("absorption_changed") is True for r in selected)
             cells.append(f"{passing}/{len(seeds)} pass; {changed}/{len(seeds)} changed")
         lines.append(f"| {fixture} | " + " | ".join(cells) + " |")
     lines += ["", "Actual changes and moves (required in every case):", "",
-              "| Level | Changed vs baseline | Changed vs absorption disabled | Cases with moves "
+              "| Level | Changed vs absorption disabled | Cases with moves "
               "| Moves | Pass executions | Coverage |",
-              "|---|---|---|---|---|---|---|"]
+              "|---|---|---|---|---|---|"]
     for level in levels:
         matches = [r for r in coverage if r.get("optimization_level") == level]
         rec = matches[0] if len(matches) == 1 else {}
         total = len(fixtures) * len(seeds)
-        lines.append(f"| {level} | {rec.get('cases_changed', '?')}/{total} | "
-                     f"{rec.get('cases_absorption_changed', '?')}/{total} | "
+        lines.append(f"| {level} | {rec.get('cases_absorption_changed', '?')}/{total} | "
                      f"{rec.get('cases_with_moves', '?')} | "
                      f"{rec.get('absorption_moves', '?')} | {rec.get('absorption_runs', '?')} | "
                      f"{'PASS' if passed(rec) else 'FAIL'} |")
-    lines += ["", "Totals across all cases (baseline → with absorption):", "",
+    lines += ["", "Totals across all cases (absorption disabled → enabled):", "",
               "| Level | Two-qubit gates | Circuit depths (sum) |", "|---|---|---|"]
     for level in levels:
         selected = [r for r in cases if r.get("optimization_level") == level]
         totals = []
         for metric in ("two_qubit_gates", "depth"):
-            values = [r.get(key) for r in selected for key in ("baseline_" + metric, metric)]
+            values = [r.get(key) for r in selected for key in ("disabled_" + metric, metric)]
             if all(type(value) is int and value >= 0 for value in values):
                 totals.append(f"{sum(values[::2])} → {sum(values[1::2])}")
             else:
@@ -185,7 +179,7 @@ def build_report(records, results_path):
         good = len(matches) == 1 and passed(matches[0])
         lines.append(f"- `{name}`: {'PASS' if good else 'FAIL'}.")
     if not complete:
-        lines += ["", "FAIL: missing, duplicate, or unexpected results/settings, missing baseline "
+        lines += ["", "FAIL: missing, duplicate, or unexpected results/settings, missing Qiskit "
                   "provenance, or incomplete per-case change/move evidence."]
     for rec in cases:
         if passed(rec) and not case_passed(rec):

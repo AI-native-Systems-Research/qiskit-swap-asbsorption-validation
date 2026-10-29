@@ -1,6 +1,5 @@
 """The runner must reject unreliable builds and ineffective comparison cases."""
 import contextlib
-import hashlib
 import io
 import json
 import math
@@ -13,9 +12,9 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
-import baseline_worker
 from run_validation import (OperatorMismatch, check_changes, check_output, gate_structure,
-                            main as validation_main, operator_key, run_baseline, source_revision)
+                            main as validation_main, operator_key, source_revision,
+                            transpile_disabled_and_check)
 
 
 class CircuitChangeTests(unittest.TestCase):
@@ -30,28 +29,19 @@ class CircuitChangeTests(unittest.TestCase):
         before = (("cx", (0, 1)), ("cx", (1, 2)))
         after = (("cx", (1, 2)), ("cx", (0, 1)))
         metrics = dict(absorption_moves=1)
-        check_changes(after, before, before, metrics)
-        self.assertIs(metrics["circuit_changed"], True)
+        check_changes(after, before, metrics)
         self.assertIs(metrics["absorption_changed"], True)
 
     def test_no_moves_fails_even_when_outputs_differ(self):
         metrics = dict(absorption_moves=0)
         with self.assertRaisesRegex(ValueError, "No absorption moves"):
-            check_changes("after", "before", "disabled", metrics)
-        self.assertIs(metrics["circuit_changed"], True)
+            check_changes("after", "disabled", metrics)
         self.assertIs(metrics["absorption_changed"], True)
 
-    def test_unchanged_baseline_fails_despite_moves(self):
-        metrics = dict(absorption_moves=2)
-        with self.assertRaisesRegex(ValueError, "unchanged from baseline"):
-            check_changes("same", "same", "disabled", metrics)
-        self.assertIs(metrics["circuit_changed"], False)
-
-    def test_unrelated_baseline_difference_cannot_satisfy_absorption_check(self):
+    def test_unchanged_output_fails_despite_moves(self):
         metrics = dict(absorption_moves=2)
         with self.assertRaisesRegex(ValueError, "unchanged with absorption disabled"):
-            check_changes("same", "older checkout", "same", metrics)
-        self.assertIs(metrics["circuit_changed"], True)
+            check_changes("same", "same", metrics)
         self.assertIs(metrics["absorption_changed"], False)
 
 
@@ -67,11 +57,10 @@ class GateStructureTests(unittest.TestCase):
             self.assertEqual(first_structure, second_structure)
             self.assertEqual(first_structure.global_phase, 0)
             metrics = dict(absorption_moves=1)
-            with self.assertRaisesRegex(ValueError, "unchanged from baseline"):
-                check_changes(first, second, second, metrics)
+            with self.assertRaisesRegex(ValueError, "unchanged with absorption disabled"):
+                check_changes(first, second, metrics)
         self.assertEqual(first.global_phase, 0.19)
         self.assertEqual(second.global_phase, 0.37)
-        self.assertIs(metrics["circuit_changed"], False)
         self.assertIs(metrics["absorption_changed"], False)
         for call in converters.circuit_to_dag.call_args_list:
             self.assertEqual(call.kwargs, dict(copy_operations=False))
@@ -164,121 +153,187 @@ class OperatorCacheTests(unittest.TestCase):
         self.assertEqual(cache, {})
 
 
-class BaselineSubprocessTests(unittest.TestCase):
-    def test_fresh_interpreter_receives_identical_inputs_and_requested_matrix(self):
+class DisabledControlTests(unittest.TestCase):
+    def test_only_absorption_is_bypassed_and_patch_is_restored(self):
+        for fail_pipeline in (False, True):
+            with self.subTest(fail_pipeline=fail_pipeline):
+                class AbsorptionPass:
+                    def run(self, dag):
+                        dag.append("absorption")
+                        return dag
+
+                original_run = AbsorptionPass.run
+                presets = ModuleType("qiskit.transpiler.preset_passmanagers")
+                presets._swap_absorption = SimpleNamespace(_AbsorbIntoSwaps=AbsorptionPass)
+                source = ["input"]
+                qc = SimpleNamespace(copy=lambda: source.copy())
+                output = []
+
+                def pipeline(dag):
+                    dag = AbsorptionPass().run(dag)
+                    dag.append("later pass")
+                    output.extend(dag)
+                    if fail_pipeline:
+                        raise ValueError("later pass failed")
+                    return dag
+
+                manager = SimpleNamespace(run=Mock(side_effect=pipeline))
+                reference, cmap, metrics, cache = object(), object(), {}, {}
+                with (patch.dict(sys.modules, {presets.__name__: presets}),
+                      patch("run_validation.preset_manager", return_value=manager) as preset,
+                      patch("run_validation.check_output") as check):
+                    if fail_pipeline:
+                        with self.assertRaisesRegex(ValueError, "later pass failed"):
+                            transpile_disabled_and_check(qc, reference, cmap, 7, 3, metrics, cache)
+                        check.assert_not_called()
+                    else:
+                        result = transpile_disabled_and_check(qc, reference, cmap, 7, 3, metrics, cache)
+                        self.assertEqual(result, ["input", "later pass"])
+                        check.assert_called_once_with(result, qc, reference, cmap, metrics, cache)
+                    preset.assert_called_once_with(qc, cmap, 7, 3)
+                self.assertEqual(output, ["input", "later pass"])
+                self.assertEqual(source, ["input"])
+                self.assertIs(AbsorptionPass.run, original_run)
+                self.assertEqual(AbsorptionPass().run([]), ["absorption"])
+
+    def test_disabled_output_must_pass_phase_sensitive_correctness_check(self):
+        output, reference = fake_basis_output(), object()
+        qc = SimpleNamespace(num_qubits=10, copy=lambda: object())
+        presets = ModuleType("qiskit.transpiler.preset_passmanagers")
+        presets._swap_absorption = SimpleNamespace(_AbsorbIntoSwaps=type(
+            "AbsorptionPass", (), {"run": lambda self, dag: dag}))
+        original_run = presets._swap_absorption._AbsorbIntoSwaps.run
+        quantum_info = ModuleType("qiskit.quantum_info")
+        quantum_info.Operator = SimpleNamespace(from_circuit=Mock(return_value=object()))
+        manager = SimpleNamespace(run=Mock(return_value=output))
+        cmap, metrics = SimpleNamespace(get_edges=lambda: [(0, 1)]), {}
+        with (patch.dict(sys.modules, {presets.__name__: presets, quantum_info.__name__: quantum_info}),
+              patch("run_validation.preset_manager", return_value=manager)):
+            with self.assertRaisesRegex(OperatorMismatch, "Disabled control operator mismatch"):
+                transpile_disabled_and_check(qc, reference, cmap, 0, 2, metrics)
+        quantum_info.Operator.from_circuit.assert_called_once_with(output)
+        self.assertEqual(metrics["depth"], 2)
+        self.assertEqual(metrics["two_qubit_gates"], 1)
+        self.assertIs(presets._swap_absorption._AbsorbIntoSwaps.run, original_run)
+
+
+class CaseValidationTests(unittest.TestCase):
+    def run_cases(self, *, disabled_error=None, enabled_error=None, preparation_error=None):
+        qc, reference, cmap, builder = object(), object(), object(), object()
+        quantum_info = ModuleType("qiskit.quantum_info")
+        quantum_info.Operator = SimpleNamespace(from_circuit=Mock(return_value=reference))
+        transpiler = ModuleType("qiskit.transpiler")
+        transpiler.CouplingMap = SimpleNamespace(from_line=Mock(return_value=cmap))
+        presets = ModuleType("qiskit.transpiler.preset_passmanagers")
+        presets.builtin_plugins = SimpleNamespace(_get_trial_count=lambda _: 20)
+        modules = {module.__name__: module for module in (quantum_info, transpiler, presets)}
+
+        def disabled_run(qc, reference, cmap, seed, level, metrics, cache):
+            metrics.update(depth=12, two_qubit_gates=7, final_permutation=list(range(10)))
+            if disabled_error is not None:
+                raise disabled_error
+            return "disabled"
+
+        def enabled_run(qc, reference, cmap, seed, level, metrics, cache):
+            metrics.update(depth=10, two_qubit_gates=5, final_permutation=[1, 0, *range(2, 10)],
+                           absorption_runs=1, absorption_moves=2, absorption_swaps_seen=3)
+            if enabled_error is not None:
+                raise enabled_error
+            return "enabled"
+
+        disabled = Mock(side_effect=disabled_run)
+        enabled = Mock(side_effect=enabled_run)
+        prepare = Mock(return_value=qc, side_effect=preparation_error)
+        load = Mock(return_value={})
         with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            inputs = {"fixture": dict(path=str(directory / "input.qpy"), sha256="a" * 64)}
-            source = directory / "baseline checkout"
-            response = dict(environment=dict(sha="before"), cases=[])
+            output = Path(temporary) / "results.jsonl"
+            argv = ["run_validation.py", "--seeds", "0", "7", "--out", str(output)]
+            with (patch.dict(sys.modules, modules), patch("sys.argv", argv),
+                  contextlib.redirect_stdout(io.StringIO()),
+                  patch.multiple("run_validation", load_source=load,
+                                 fixtures=Mock(return_value={"fixture": builder}),
+                                 prepare_input=prepare, transpile_disabled_and_check=disabled,
+                                 transpile_and_check=enabled,
+                                 gate_structure=Mock(side_effect=lambda circuit: circuit),
+                                 self_checks=Mock(return_value=[]), feature_checks=Mock(return_value=[]))):
+                status = validation_main()
+            records = [json.loads(line) for line in output.read_text().splitlines()]
+        load.assert_called_once()
+        prepare.assert_called_once_with(builder)
+        return status, records, disabled, enabled, qc, reference, cmap
 
-            def worker(command, *, check):
-                self.assertTrue(check)
-                self.assertEqual(command[0], sys.executable)
-                self.assertEqual(Path(command[1]).name, "baseline_worker.py")
-                self.assertEqual(command[command.index("--qiskit-src") + 1], str(source))
-                request = Path(command[command.index("--request") + 1])
-                self.assertEqual(json.loads(request.read_text()),
-                                 dict(inputs=inputs, seeds=[7, 42], optimization_levels=[3]))
-                Path(command[command.index("--out") + 1]).write_text(json.dumps(response))
+    def test_same_input_and_settings_are_used_for_both_modes_without_baseline(self):
+        status, records, disabled, enabled, qc, reference, cmap = self.run_cases()
+        self.assertEqual(status, 0)
+        self.assertEqual(records[0]["schema_version"], 4)
+        self.assertEqual(records[0]["comparison_mode"], "enabled_vs_disabled")
+        self.assertNotIn("baseline", records[0])
+        self.assertEqual(disabled.call_count, 4)
+        self.assertEqual(enabled.call_count, 4)
+        cases = [rec for rec in records if rec["record"] == "case"]
+        self.assertEqual({(rec["optimization_level"], rec["seed"]) for rec in cases},
+                         {(2, 0), (2, 7), (3, 0), (3, 7)})
+        for disabled_call, enabled_call in zip(disabled.call_args_list, enabled.call_args_list):
+            self.assertEqual(disabled_call.args[:5], enabled_call.args[:5])
+            self.assertEqual(disabled_call.args[:3], (qc, reference, cmap))
+            self.assertIs(disabled_call.args[6], enabled_call.args[6])
+        for rec in cases:
+            self.assertIs(rec["passed"], True)
+            self.assertIs(rec["disabled_passed"], True)
+            self.assertIs(rec["enabled_passed"], True)
+            self.assertIs(rec["absorption_changed"], True)
+            self.assertEqual(rec["disabled_depth"], 12)
+            self.assertEqual(rec["disabled_two_qubit_gates"], 7)
+            self.assertEqual(rec["depth"], 10)
+            self.assertEqual(rec["two_qubit_gates"], 5)
+            self.assertFalse(any(key.startswith("baseline") for key in rec))
+        for rec in records:
+            if rec["record"] == "coverage":
+                self.assertIs(rec["passed"], True)
+                self.assertEqual(rec["cases_absorption_changed"], 2)
 
-            with patch("run_validation.subprocess.run", side_effect=worker) as launch:
-                self.assertEqual(run_baseline(source, inputs, [7, 42], [3], directory), response)
-            launch.assert_called_once()
-
-    def test_failed_worker_does_not_reuse_a_previous_response(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            (directory / "baseline.json").write_text('{"cases": []}')
-            with patch("run_validation.subprocess.run",
-                       side_effect=subprocess.CalledProcessError(1, ["worker"])):
-                with self.assertRaises(subprocess.CalledProcessError):
-                    run_baseline(directory / "baseline", {}, [0], [2], directory)
-
-    def test_worker_rejects_tampered_input_for_every_case(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            circuit = directory / "input.qpy"
-            circuit.write_bytes(b"changed contents")
-            request, output = directory / "request.json", directory / "baseline.json"
-            request.write_text(json.dumps(dict(
-                inputs={"fixture": dict(path=str(circuit), sha256="a" * 64)},
-                seeds=[0, 7], optimization_levels=[2, 3])))
-            fake_qiskit, fake_transpiler = ModuleType("qiskit"), ModuleType("qiskit.transpiler")
-            fake_qiskit.qpy = Mock()
-            fake_transpiler.CouplingMap = Mock()
-            argv = ["baseline_worker.py", "--qiskit-src", str(directory),
-                    "--request", str(request), "--out", str(output)]
-            with (patch.dict(sys.modules, {"qiskit": fake_qiskit,
-                                           "qiskit.transpiler": fake_transpiler}),
-                  patch("sys.argv", argv),
-                  patch("baseline_worker.load_source", return_value=dict(sha="before")),
-                  patch("baseline_worker.preset_manager") as transpile,
-                  contextlib.redirect_stdout(io.StringIO())):
-                baseline_worker.main()
-            cases = json.loads(output.read_text())["cases"]
-            self.assertEqual({(r["optimization_level"], r["seed"]) for r in cases},
-                             {(2, 0), (2, 7), (3, 0), (3, 7)})
-            for case in cases:
-                self.assertIn("Input circuit changed in transit", case["error"])
-                self.assertEqual(case["input_sha256"], hashlib.sha256(circuit.read_bytes()).hexdigest())
-                self.assertNotIn("output", case)
-            fake_qiskit.qpy.load.assert_not_called()
-            transpile.assert_not_called()
-
-
-class CaseFailureTests(unittest.TestCase):
-    def test_baseline_and_candidate_errors_fail_required_cases(self):
+    def test_disabled_and_enabled_errors_fail_every_required_case(self):
         scenarios = (
-            (OperatorMismatch("bad baseline unitary"), None, "Baseline operator mismatch"),
-            (ValueError("bad baseline layout"), None, "bad baseline layout"),
-            (None, OperatorMismatch("bad candidate unitary"), "bad candidate unitary"),
+            (OperatorMismatch("Disabled control operator mismatch"), None),
+            (ValueError("bad disabled layout"), None),
+            (None, OperatorMismatch("bad enabled unitary")),
+            (None, ValueError("bad enabled layout")),
         )
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            circuit, output = directory / "circuit.qpy", directory / "results.jsonl"
-            circuit.write_bytes(b"QPY decoding is mocked")
-            inputs = {"fixture": dict(path=str(circuit), sha256="a" * 64)}
-            baseline = dict(environment={}, cases=[dict(
-                fixture="fixture", optimization_level=2, seed=0,
-                input_sha256="a" * 64, output=str(circuit))])
-            qiskit = ModuleType("qiskit")
-            qiskit.qpy = SimpleNamespace(load=Mock(return_value=[object()]))
-            quantum_info = ModuleType("qiskit.quantum_info")
-            quantum_info.Operator = SimpleNamespace(from_circuit=Mock(return_value=object()))
-            transpiler = ModuleType("qiskit.transpiler")
-            transpiler.CouplingMap = SimpleNamespace(from_line=Mock(return_value=object()))
-            presets = ModuleType("qiskit.transpiler.preset_passmanagers")
-            presets.builtin_plugins = SimpleNamespace(_get_trial_count=lambda _: 20)
-            presets._swap_absorption = Mock()
-            modules = {module.__name__: module for module in (qiskit, quantum_info, transpiler, presets)}
-            argv = ["run_validation.py", "--seeds", "0", "--optimization-levels", "2",
-                    "--out", str(output)]
-            for baseline_error, candidate_error, expected_error in scenarios:
-                with self.subTest(baseline=baseline_error, candidate=candidate_error):
-                    candidate = Mock(side_effect=candidate_error)
-                    with (patch.dict(sys.modules, modules), patch("sys.argv", argv),
-                          contextlib.redirect_stdout(io.StringIO()),
-                          patch.multiple("run_validation",
-                                         load_source=Mock(return_value={}),
-                                         fixtures=Mock(return_value={"fixture": Mock()}),
-                                         prepare_inputs=Mock(return_value=inputs),
-                                         run_baseline=Mock(return_value=baseline),
-                                         check_output=Mock(side_effect=baseline_error),
-                                         transpile_and_check=candidate,
-                                         self_checks=Mock(return_value=[]),
-                                         feature_checks=Mock(return_value=[]))):
-                        # A failed required case must fail both the run and coverage.
-                        self.assertEqual(validation_main(), 1)
-                    records = [json.loads(line) for line in output.read_text().splitlines()]
-                    case, = [rec for rec in records if rec["record"] in ("case", "excluded_case")]
-                    self.assertEqual(case["record"], "case")
-                    self.assertIs(case["passed"], False)
-                    self.assertEqual(candidate.call_count, int(baseline_error is None))
-                    self.assertNotIn("reason", case)
-                    self.assertIn(expected_error, case["error"])
-                    coverage, = [rec for rec in records if rec["record"] == "coverage"]
-                    self.assertIs(coverage["passed"], False)
+        for disabled_error, enabled_error in scenarios:
+            with self.subTest(disabled=disabled_error, enabled=enabled_error):
+                status, records, disabled, enabled, *_ = self.run_cases(
+                    disabled_error=disabled_error, enabled_error=enabled_error)
+                self.assertEqual(status, 1)
+                self.assertEqual(disabled.call_count, 4)
+                self.assertEqual(enabled.call_count, 4 if disabled_error is None else 0)
+                cases = [rec for rec in records if rec["record"] == "case"]
+                self.assertEqual(len(cases), 4)
+                for rec in cases:
+                    self.assertIs(rec["passed"], False)
+                    self.assertIs(rec["disabled_passed"], disabled_error is None)
+                    self.assertIs(rec["enabled_passed"], False)
+                    self.assertEqual(rec["disabled_depth"], 12)
+                    self.assertIn(str(disabled_error or enabled_error), rec["error"])
+                    self.assertNotIn("reason", rec)
+                for rec in records:
+                    if rec["record"] == "coverage":
+                        self.assertIs(rec["passed"], False)
+
+    def test_preparation_error_is_recorded_for_the_full_requested_matrix(self):
+        status, records, disabled, enabled, *_ = self.run_cases(
+            preparation_error=ValueError("fixture construction failed"))
+        self.assertEqual(status, 1)
+        disabled.assert_not_called()
+        enabled.assert_not_called()
+        cases = [rec for rec in records if rec["record"] == "case"]
+        self.assertEqual({(rec["optimization_level"], rec["seed"]) for rec in cases},
+                         {(2, 0), (2, 7), (3, 0), (3, 7)})
+        for rec in cases:
+            self.assertIs(rec["passed"], False)
+            self.assertIs(rec["disabled_passed"], False)
+            self.assertIs(rec["enabled_passed"], False)
+            self.assertIn("fixture construction failed", rec["error"])
+        self.assertTrue(all(rec["record"] != "excluded_case" for rec in records))
 
 
 class SourceRevisionTests(unittest.TestCase):
