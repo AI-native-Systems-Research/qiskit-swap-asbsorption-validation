@@ -2,11 +2,7 @@
 
 **PASS** — 132/132 cases; 4/4 negative self-checks; 10/10 focused checks.
 
-Revision: `6b5145d2e94799ba3b01494a706537efc2925242`. Seeds: `[0, 1, 42, 2, 7, 123]`. Optimization levels: `[2, 3]`.
-Run: 2026-10-29T04:05:02+00:00. Qiskit 2.7.0.dev0+6b5145d; Python 3.11.8.
-Qiskit source: `/Users/ophir/PycharmProjects/qiskit-swap-absorption`.
-Loaded extension: `/Users/ophir/PycharmProjects/qiskit-swap-absorption/qiskit/_accelerate.cpython-311-darwin.so`.
-Loaded extension SHA-256: `627034a679e9e709e36d8e4b5726a78731abc4c126622e7b884364f6bfd058f8`.
+Seeds: `[0, 1, 42, 2, 7, 123]`. Optimization levels: `[2, 3]`.
 
 Comparison: absorption enabled vs disabled in the same Qiskit checkout. Both runs use copies of the same prepared input and identical transpiler settings. The disabled run temporarily replaces the absorption pass with a no-op; all other passes still execute.
 
@@ -38,10 +34,10 @@ Actual changes and moves (required in every case):
 
 Totals across all cases (absorption disabled → enabled):
 
-| Level | Two-qubit gates | Circuit depths (sum) |
-|---|---|---|
-| 2 | 18187 → 17405 | 19665 → 20124 |
-| 3 | 18187 → 17405 | 19665 → 20118 |
+| Level | Two-qubit gates |
+|---|---|
+| 2 | 18187 → 17405 |
+| 3 | 18187 → 17405 |
 
 Negative controls use a passing output with a nonidentity final permutation at each level. Ignoring its layout and appending an extra X must each break the unitary comparison.
 
@@ -63,4 +59,4 @@ Focused checks:
 - `terminal_wire_guard`: PASS.
 - `intervening_swap_guard`: PASS.
 
-Scope: full preset correctness on these circuits and seeds, not a general proof. Gate counts and depths are diagnostics; an improvement is not required for every case. Raw results and build path: `results/results.jsonl`.
+Scope: full preset correctness on these circuits and seeds, not a general proof. Gate counts are diagnostics; an improvement is not required for every case. Raw results and build path: `results/results.jsonl`.

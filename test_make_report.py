@@ -63,10 +63,13 @@ class ReportTests(unittest.TestCase):
         self.assertIn("22/22 cases", report)
         self.assertIn("Level 2 | Level 3", report)
         self.assertIn("1/1 pass; 1/1 changed", report)
-        self.assertIn("77 → 55", report)
-        self.assertIn("132 → 110", report)
-        self.assertIn("Revision: `test`", report)
-        self.assertIn("Qiskit source: `/test/qiskit`", report)
+        self.assertIn("| Level | Two-qubit gates |\n|---|---|", report)
+        self.assertIn("| 2 | 77 → 55 |\n", report)
+        self.assertIn("Seeds: `[0]`. Optimization levels: `[2, 3]`.", report)
+        self.assertNotIn("Circuit depths (sum)", report)
+        for label in ("Revision:", "Run:", "Qiskit source:", "Loaded extension:",
+                      "Loaded extension SHA-256:", "Python test", "Qiskit test"):
+            self.assertNotIn(label, report)
         self.assertIn("absorption disabled → enabled", report)
         self.assertIn("same Qiskit checkout", report)
         self.assertNotIn("baseline", report.lower())
@@ -147,8 +150,8 @@ class ReportTests(unittest.TestCase):
                 ok, report = build_report(records, "sample.jsonl")
                 self.assertFalse(ok)
                 self.assertIn("| 2 | 10/11 | 10 | 10 | 10 | FAIL |", report)
-                self.assertIn("| 2 | incomplete | incomplete |", report)
-                self.assertIn("| 3 | 77 → 55 | 132 → 110 |", report)
+                self.assertIn("| 2 | incomplete |\n", report)
+                self.assertIn("| 3 | 77 → 55 |\n", report)
 
     def test_coverage_display_uses_actual_evidence_and_validated_status(self):
         records = complete_records()

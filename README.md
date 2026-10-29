@@ -30,9 +30,9 @@ and optimization levels 2 and 3. Every circuit must achieve **6/6 pass; 6/6 chan
 at both levels.
 
 All cases must pass. In the report, "changed" means the enabled and disabled gate
-structures differ. Gate-count and depth totals show **absorption disabled → enabled**;
-they do not have to improve in every case. The report records the checkout's
-revision and build identity.
+structures differ. Gate-count totals show **absorption disabled → enabled**;
+they do not have to improve in every case. Raw results record the checkout's
+revision and build identity, along with circuit depths.
 
 The Qiskit checkout must contain the absorption implementation, have a clean
 source tree, and have an up-to-date build. The Python environment must have the

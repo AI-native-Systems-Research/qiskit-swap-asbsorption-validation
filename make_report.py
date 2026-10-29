@@ -150,12 +150,7 @@ def build_report(records, results_path):
         f"**{'PASS' if ok else 'FAIL'}** — {sum(map(case_passed, unique_cases))}/{sum(expected.values())} cases; "
         f"{sum(check_good.values())}/{len(CHECKS) * len(levels)} negative self-checks; "
         f"{sum(map(passed, features))}/{len(FEATURE_CHECKS)} focused checks.", "",
-        f"Revision: `{env.get('sha', '?')}`. Seeds: `{seeds}`. Optimization levels: `{levels}`.",
-        f"Run: {env.get('timestamp', '?')}. Qiskit {env.get('qiskit_version', '?')}; "
-        f"Python {env.get('python', '?')}.",
-        f"Qiskit source: `{env.get('qiskit_source', '?')}`.",
-        f"Loaded extension: `{env.get('accelerate_file', '?')}`.",
-        f"Loaded extension SHA-256: `{env.get('accelerate_sha256', '?')}`.", "",
+        f"Seeds: `{seeds}`. Optimization levels: `{levels}`.", "",
         "Comparison: absorption enabled vs disabled in the same Qiskit checkout. "
         "Both runs use copies of the same prepared input and identical transpiler settings. "
         "The disabled run temporarily replaces the absorption pass with a no-op; "
@@ -195,17 +190,16 @@ def build_report(records, results_path):
                      f"{summary['cases_with_moves']} | {moves} | {runs} | "
                      f"{'PASS' if coverage_good[level] else 'FAIL'} |")
     lines += ["", "Totals across all cases (absorption disabled → enabled):", "",
-              "| Level | Two-qubit gates | Circuit depths (sum) |", "|---|---|---|"]
+              "| Level | Two-qubit gates |", "|---|---|"]
     for level in levels:
         selected = level_cases[level]
-        totals = []
-        for metric in ("two_qubit_gates", "depth"):
-            values = [r.get(key) for r in selected for key in ("disabled_" + metric, metric)]
-            if matrix_complete[level] and all(type(value) is int and value >= 0 for value in values):
-                totals.append(f"{sum(values[::2])} → {sum(values[1::2])}")
-            else:
-                totals.append("incomplete")
-        lines.append(f"| {level} | " + " | ".join(totals) + " |")
+        values = [r.get(key) for r in selected
+                  for key in ("disabled_two_qubit_gates", "two_qubit_gates")]
+        if matrix_complete[level] and all(type(value) is int and value >= 0 for value in values):
+            total = f"{sum(values[::2])} → {sum(values[1::2])}"
+        else:
+            total = "incomplete"
+        lines.append(f"| {level} | {total} |")
     lines += ["", "Negative controls use a passing output with a nonidentity final permutation "
               "at each level. Ignoring its layout and appending an extra X must each break "
               "the unitary comparison.", ""]
@@ -236,7 +230,7 @@ def build_report(records, results_path):
             label += f" level {rec['optimization_level']}"
         lines += ["", f"FAIL: {label}: {rec.get('error', 'check failed')}"]
     lines += ["", "Scope: full preset correctness on these circuits and seeds, not a general proof. "
-              "Gate counts and depths are diagnostics; an improvement is not required for every case. "
+              "Gate counts are diagnostics; an improvement is not required for every case. "
               f"Raw results and build path: `{results_path}`."]
     return ok, "\n".join(lines) + "\n"
 
